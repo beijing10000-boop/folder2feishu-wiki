@@ -373,7 +373,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "1.0.0-rc.8-demo",
+      version: "1.0.0-rc.9-demo",
       database: "ok"
     } as T;
   }

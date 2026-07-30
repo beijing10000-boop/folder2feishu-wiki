@@ -127,6 +127,7 @@ const steps: Array<{
 ];
 
 const STEP_STORAGE_KEY = "folder2feishu:last-step";
+const BOOT_TIMEOUT_MS = 15_000;
 const validSteps = new Set<StepId>(steps.map((item) => item.id));
 
 const readSavedStep = (): StepId => {
@@ -137,6 +138,21 @@ const readSavedStep = (): StepId => {
     return "config";
   }
 };
+
+async function withBootTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(
+      () => reject(new ApiError("本机服务响应超时，请重新连接或查看运行日志。")),
+      BOOT_TIMEOUT_MS
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
+}
 
 const severityIcon: Record<Severity, typeof CheckCircle2> = {
   ok: CheckCircle2,
@@ -459,6 +475,7 @@ function App() {
   const [runFilter, setRunFilter] = useState<"ALL" | "FAILED" | "ACTIVE">("ALL");
   const [busy, setBusy] = useState("");
   const [booting, setBooting] = useState(true);
+  const [bootError, setBootError] = useState("");
   const [notice, setNotice] = useState<{ tone: Severity; text: string }>();
 
   const notify = useCallback((text: string, tone: Severity = "ok") => {
@@ -514,13 +531,15 @@ function App() {
     let alive = true;
     (async () => {
       try {
-        await api.getSession();
-        const [health, currentSettings, currentAuth, projects] = await Promise.all([
-          api.health(),
-          api.getSettings(),
-          api.getAuthStatus(),
-          api.listProjects()
-        ]);
+        await withBootTimeout(api.getSession());
+        const [health, currentSettings, currentAuth, projects] = await withBootTimeout(
+          Promise.all([
+            api.health(),
+            api.getSettings(),
+            api.getAuthStatus(),
+            api.listProjects()
+          ])
+        );
         if (!alive) return;
         setVersion(health.version);
         setSettings(currentSettings);
@@ -578,12 +597,21 @@ function App() {
             create_wrapper: true,
             wrapper_name: activeProject.wrapper_name ?? ""
           });
-          await loadProjectData(activeProject);
+          // A large inventory tree, audit ledger or live preflight can take a
+          // long time to hydrate. They must never hold the whole application
+          // behind the boot screen.
+          void loadProjectData(activeProject);
         } else {
           setStep("config");
         }
       } catch (error) {
-        if (alive) showError(error);
+        if (alive) {
+          const message =
+            error instanceof ApiError || error instanceof Error
+              ? error.message
+              : "本机服务初始化失败。";
+          setBootError(message);
+        }
       } finally {
         if (alive) setBooting(false);
       }
@@ -1161,6 +1189,21 @@ function App() {
           <LoaderCircle className="spin" size={28} aria-hidden="true" />
           <h1>正在建立本机安全会话</h1>
           <p>读取迁移台账、授权状态与上次断点…</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (bootError) {
+    return (
+      <main className="boot-screen">
+        <div className="boot-screen__scope boot-screen__scope--error" role="alert">
+          <OctagonX size={30} aria-hidden="true" />
+          <h1>本机迁移服务连接失败</h1>
+          <p>{bootError}</p>
+          <Button icon={RefreshCcw} variant="primary" onClick={() => window.location.reload()}>
+            重新连接
+          </Button>
         </div>
       </main>
     );

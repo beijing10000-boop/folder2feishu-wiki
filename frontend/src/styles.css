@@ -2771,6 +2771,15 @@ input::placeholder {
   color: var(--green);
 }
 
+.boot-screen__scope--error > svg {
+  color: var(--red);
+}
+
+.boot-screen__scope--error p {
+  max-width: 32rem;
+  text-align: center;
+}
+
 .boot-screen h1 {
   margin: 0;
   font-family: Bahnschrift, "Microsoft YaHei UI", sans-serif;
