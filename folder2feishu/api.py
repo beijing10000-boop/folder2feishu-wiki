@@ -128,6 +128,7 @@ def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, A
     project = services.store.get_project(project_id)
     latest = services.jobs.latest_for_project(project_id)
     issues = services.store.list_issues(project_id, scan_id=project.current_scan_id)
+    summary = services.inventory_summary(project_id)
     status = (
         latest.status.upper()
         if latest and latest.kind == "scan"
@@ -141,11 +142,14 @@ def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, A
         "status": status,
         "complete": project.scan_complete,
         "cancel_requested": bool(latest and latest.kind == "scan" and latest.status == "stopped"),
-        "summary": services.inventory_summary(project_id),
-        "counts": services.inventory_summary(project_id),
+        "summary": summary,
+        "counts": summary,
         "checks": [_issue_payload(issue) for issue in issues],
         "issues": [_issue_payload(issue) for issue in issues],
-        "tree": services.inventory_tree(project_id),
+        # The complete tree has its own endpoint. Materializing tens of
+        # thousands of nodes here made every progress poll and application
+        # restore wait for the largest payload in the project.
+        "tree": [],
         "scanned_items": (int(latest.details.get("scanned_items", 0)) if latest else 0),
         "current_path": latest.current_item if latest else "",
         "started_at": latest.started_at.isoformat() if latest and latest.started_at else None,
