@@ -1867,14 +1867,14 @@ function App() {
                       <PanelHeading
                         eyebrow="INVENTORY EVIDENCE"
                         title="本地完整性检查"
-                        copy="占位、不可读或超限对象会阻断；0 字节文件将以同名空白知识库节点保留。"
+                        copy="占位、不可读或超限对象会阻断；飞书不支持的 0 字节文件将记录后自动跳过。"
                         icon={SearchCheck}
                       />
                       <div className="inventory-findings">
                         <div><span>不可读</span><strong>{scan.summary.unreadable.toLocaleString()}</strong></div>
                         <div><span>0 字节</span><strong>{scan.summary.empty_files.toLocaleString()}</strong></div>
                         <div><span>名称过长</span><strong>{scan.summary.too_long_names.toLocaleString()}</strong></div>
-                        <div><span>预计上传调用</span><strong>{scan.summary.upload_calls.toLocaleString()}</strong></div>
+                        <div><span>预计上传 API 调用</span><strong>{scan.summary.upload_calls.toLocaleString()}</strong></div>
                       </div>
                       <div className="finding-list">
                         {scan.checks.length ? (
@@ -1945,9 +1945,9 @@ function App() {
                   <Metric icon={HardDrive} label="数据量" value={formatBytes(scan.summary.bytes)} />
                   <Metric
                     icon={Cloud}
-                    label="预计上传调用"
+                    label="预计上传 API 调用"
                     value={scan.summary.upload_calls.toLocaleString()}
-                    note={`约 ${scan.summary.estimated_days} 个自然日`}
+                    note={`大文件分片会多次调用 · 约 ${scan.summary.estimated_days} 个自然日`}
                     tone="amber"
                   />
                 </div>

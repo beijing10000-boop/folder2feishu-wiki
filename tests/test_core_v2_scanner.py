@@ -55,7 +55,7 @@ def test_scanner_preserves_root_empty_directories_names_and_hashes(tmp_path):
         issues = store.list_issues(project.id, scan_id=result.scan_id)
         assert [issue.code for issue in issues] == [IssueCode.ZERO_BYTE_FILE]
         assert issues[0].severity == IssueSeverity.WARNING
-        assert issues[0].details["representation"] == "empty_wiki_docx"
+        assert issues[0].details["migration_policy"] == "report_and_skip"
         assert store.get_project(project.id).scan_complete
     finally:
         store.close()

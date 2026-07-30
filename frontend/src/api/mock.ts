@@ -124,7 +124,7 @@ const tree: TreeNode[] = [
         relative_path: "旧资料索引.txt",
         kind: "file",
         size: 0,
-        status: "PLANNED"
+        status: "DISCOVERED"
       }
     ]
   }
@@ -156,7 +156,7 @@ const checks = [
   {
     code: "ZERO_BYTE",
     title: "0 字节文件",
-    message: "3 个文件将以同名空白知识库节点保留，不占用 Drive 上传调用",
+    message: "飞书不支持空文件；3 个文件会记录在报告中并自动跳过",
     severity: "warning" as const,
     count: 3,
     blocking: false
