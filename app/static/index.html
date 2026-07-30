@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Folder2Wiki · 原目录迁移台</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='10' fill='%23315c45'/><path d='M13 18h17l5 6h16v24H13z' fill='%23dce95c'/></svg>">
+  <style>
+    :root{
+      --ink:#18211d;--paper:#f3f0e7;--panel:#fffdf7;--line:#c9c4b5;
+      --moss:#315c45;--acid:#dce95c;--rust:#b34d2e;--muted:#6c746f;
+      --shadow:0 16px 38px rgba(28,37,32,.10);
+    }
+    *{box-sizing:border-box}
+    body{margin:0;color:var(--ink);background:
+      linear-gradient(rgba(49,92,69,.035) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(49,92,69,.035) 1px,transparent 1px),
+      var(--paper);background-size:28px 28px;font-family:"Microsoft YaHei UI","Microsoft YaHei",sans-serif}
+    button,input{font:inherit}
+    .shell{max-width:1440px;margin:auto;padding:28px 30px 70px}
+    header{display:grid;grid-template-columns:1fr auto;align-items:end;border-bottom:2px solid var(--ink);padding-bottom:18px}
+    .kicker{font:700 12px "Bahnschrift",sans-serif;letter-spacing:.18em;text-transform:uppercase;color:var(--moss)}
+    h1{font:700 clamp(31px,4vw,54px) "Bahnschrift","Microsoft YaHei",sans-serif;letter-spacing:-.04em;margin:5px 0 0;line-height:.95}
+    .stamp{border:1px solid var(--ink);padding:8px 12px;background:var(--acid);font:700 12px "Bahnschrift",sans-serif;box-shadow:4px 4px 0 var(--ink)}
+    .flow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--ink);border:1px solid var(--ink);margin:24px 0}
+    .flow div{background:var(--panel);padding:14px 16px;min-height:72px}
+    .flow b{display:block;font:700 13px "Bahnschrift",sans-serif;letter-spacing:.06em}
+    .flow span{display:block;color:var(--muted);font-size:12px;margin-top:6px}
+    .grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(420px,.95fr);gap:20px}
+    .stack{display:grid;gap:20px;align-content:start}
+    .card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);padding:20px;position:relative;overflow:hidden}
+    .card:before{content:"";position:absolute;left:0;top:0;width:6px;height:100%;background:var(--moss)}
+    .card h2{font:700 18px "Bahnschrift","Microsoft YaHei",sans-serif;margin:0 0 4px}
+    .sub{color:var(--muted);font-size:12px;line-height:1.65;margin:0 0 16px}
+    .fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    label{font-size:12px;font-weight:700;display:block;color:#445049}
+    input[type=text],input[type=password]{width:100%;border:1px solid var(--line);background:#fff;padding:11px 12px;margin-top:6px;outline:none}
+    input:focus{border-color:var(--moss);box-shadow:0 0 0 3px rgba(49,92,69,.12)}
+    .wide{grid-column:1/-1}
+    .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+    button,.button{border:1px solid var(--ink);background:var(--ink);color:#fff;padding:10px 14px;text-decoration:none;cursor:pointer;font-weight:700;font-size:12px}
+    button:hover,.button:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--acid)}
+    button.secondary,.button.secondary{background:transparent;color:var(--ink)}
+    button.warn{background:var(--rust)}
+    button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+    .check{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:12px}
+    .check input{accent-color:var(--moss)}
+    .metric-grid{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--ink);margin-bottom:16px}
+    .metric{padding:14px;border-right:1px solid var(--ink);background:#fff}
+    .metric:last-child{border:0}
+    .metric strong{display:block;font:700 26px "Bahnschrift",sans-serif}
+    .metric span{font-size:11px;color:var(--muted)}
+    .progress{height:14px;border:1px solid var(--ink);background:#fff;overflow:hidden}
+    .progress i{display:block;height:100%;width:0;background:repeating-linear-gradient(135deg,var(--moss),var(--moss) 8px,#47755c 8px,#47755c 16px);transition:width .3s}
+    .jobline{display:flex;justify-content:space-between;gap:10px;font-size:12px;margin:8px 0 14px}
+    .current{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);max-width:68%}
+    .log{height:330px;overflow:auto;background:#16201b;color:#d9e2dc;padding:14px;border:1px solid #0e1511;font:12px/1.55 Consolas,monospace}
+    .log-row{display:grid;grid-template-columns:72px 62px 1fr;gap:8px;border-bottom:1px solid rgba(255,255,255,.06);padding:4px 0}
+    .log-row .error{color:#ff9a7e}.log-row .success{color:#dce95c}.log-row .warning{color:#ffd27a}
+    .failures{max-height:250px;overflow:auto;border:1px solid var(--line)}
+    .failure{padding:10px 12px;border-bottom:1px solid var(--line);background:#fff;font-size:12px}
+    .failure b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .failure span{color:var(--rust)}
+    .badge{display:inline-block;padding:3px 7px;border:1px solid currentColor;font:700 10px "Bahnschrift",sans-serif;text-transform:uppercase}
+    .ok{color:var(--moss)}.bad{color:var(--rust)}.muted{color:var(--muted)}
+    .notice{border:1px dashed var(--moss);background:rgba(220,233,92,.18);padding:10px 12px;font-size:12px;line-height:1.6;margin-top:12px}
+    .toast{position:fixed;right:24px;bottom:24px;background:var(--ink);color:#fff;padding:13px 16px;max-width:460px;box-shadow:6px 6px 0 var(--acid);display:none;z-index:10}
+    @media(max-width:980px){.grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr 1fr}.metric-grid{grid-template-columns:1fr 1fr}.metric:nth-child(2){border-right:0}.fields{grid-template-columns:1fr}.wide{grid-column:auto}}
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div><div class="kicker">Local hierarchy migration console</div><h1>原目录 → 飞书知识库</h1></div>
+    <div class="stamp" id="version">LOCAL / v—</div>
+  </header>
+
+  <section class="flow">
+    <div><b>01 · 应用凭证</b><span id="flow-config">等待配置</span></div>
+    <div><b>02 · OAuth 用户授权</b><span id="flow-oauth">等待授权</span></div>
+    <div><b>03 · 本地目录盘点</b><span id="flow-source">等待扫描</span></div>
+    <div><b>04 · 知识库迁移</b><span id="flow-job">等待开始</span></div>
+  </section>
+
+  <main class="grid">
+    <div class="stack">
+      <section class="card">
+        <h2>飞书应用与 OAuth</h2>
+        <p class="sub">凭证只保存在本机 .env；网页不会回显 App Secret。回调地址必须与开放平台安全设置完全一致。</p>
+        <div class="fields">
+          <label>App ID<input id="app-id" type="text" placeholder="cli_xxxxxxxxx"></label>
+          <label>App Secret<input id="app-secret" type="password" placeholder="已配置时可留空"></label>
+          <label class="wide">OAuth 回调地址<input id="redirect-uri" type="text" value="http://localhost:8765/oauth/callback"></label>
+        </div>
+        <div class="actions">
+          <button onclick="saveConfig()">保存配置</button>
+          <a class="button secondary" href="/oauth/login">前往飞书授权</a>
+        </div>
+        <div class="notice">所需权限：<b>wiki:wiki</b>、<b>drive:drive</b>，用户授权需包含 <b>offline_access</b>。OAuth 用户必须能编辑目标知识库节点。</div>
+      </section>
+
+      <section class="card">
+        <h2>迁移范围</h2>
+        <p class="sub">本地根目录会作为知识库中的同名节点；其下所有文件夹和文件保持原相对路径。默认忽略 desktop.ini、Thumbs.db、.DS_Store 和 Office 临时文件。</p>
+        <div class="fields">
+          <label class="wide">本地根目录<input id="source-path" type="text" placeholder="D:\TechStyle\Team FabDazzle - 文档"></label>
+          <label class="wide">目标知识库节点链接<input id="wiki-url" type="text" placeholder="https://example.feishu.cn/wiki/xxxxxxxx"></label>
+        </div>
+        <label class="check"><input id="create-wrapper" type="checkbox" checked> 在目标节点下创建与本地根目录同名的一级节点</label>
+        <div class="actions">
+          <button class="secondary" onclick="scanSource(false)">扫描本地目录</button>
+          <button class="secondary" onclick="verifyTarget()">验证目标知识库</button>
+        </div>
+        <div class="notice" id="target-note">尚未验证目标。请提供知识库中的目标父节点链接，不要填云空间 folder 链接。</div>
+      </section>
+
+      <section class="card">
+        <h2>迁移执行</h2>
+        <p class="sub">目录按深度顺序创建，文件逐个上传并挂载。关闭浏览器不影响任务；电脑不能睡眠，服务窗口需要保持运行。</p>
+        <div class="metric-grid">
+          <div class="metric"><strong id="m-folders">0</strong><span>目录</span></div>
+          <div class="metric"><strong id="m-files">0</strong><span>文件</span></div>
+          <div class="metric"><strong id="m-success">0</strong><span>已成功</span></div>
+          <div class="metric"><strong id="m-failed">0</strong><span>需处理</span></div>
+        </div>
+        <div class="progress"><i id="progress-bar"></i></div>
+        <div class="jobline"><b id="job-message">等待开始</b><span class="current" id="job-current"></span></div>
+        <div class="actions">
+          <button onclick="startMigration()">开始 / 继续迁移</button>
+          <button class="secondary" onclick="jobAction('pause')">暂停</button>
+          <button class="secondary" onclick="jobAction('resume')">继续</button>
+          <button class="warn" onclick="jobAction('stop')">停止</button>
+          <button class="secondary" onclick="retryFailed()">失败项重新排队</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="card">
+        <h2>实时迁移日志</h2>
+        <p class="sub">只记录相对路径与错误，不记录 App Secret、access token 或 refresh token。</p>
+        <div class="log" id="log"><div class="muted">暂无事件</div></div>
+      </section>
+      <section class="card">
+        <h2>异常与人工处理</h2>
+        <p class="sub">0 字节、源文件变化、源文件消失、权限或限流问题会留在这里，不会静默跳过。</p>
+        <div class="failures" id="failures"><div class="failure muted">暂无异常</div></div>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let state={};
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function toast(msg){const el=$('toast');el.textContent=msg;el.style.display='block';clearTimeout(window._toast);window._toast=setTimeout(()=>el.style.display='none',5200)}
+async function api(path,method='GET',body){
+  const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+  let data={};try{data=await r.json()}catch{}
+  if(!r.ok)throw new Error(data.detail||data.error||`HTTP ${r.status}`);
+  return data;
+}
+function fileCount(status){return Number(state.summary?.files?.[status]?.count||0)}
+function render(){
+  $('version').textContent=`LOCAL / v${state.version||'—'}`;
+  $('app-id').value=state.config?.app_id||'';
+  $('redirect-uri').value=state.config?.redirect_uri||'http://localhost:8765/oauth/callback';
+  if(!$('source-path').value)$('source-path').value=state.source?.root||'';
+  if(!$('wiki-url').value)$('wiki-url').value=state.target?.url||'';
+  $('create-wrapper').checked=state.target?.create_wrapper!==false;
+  $('flow-config').innerHTML=state.config?.configured?'<span class="ok">● 已配置</span>':'<span class="bad">● 未配置</span>';
+  $('flow-oauth').innerHTML=state.oauth?.authorized?'<span class="ok">● 已授权</span>':'<span class="bad">● 未授权</span>';
+  $('flow-source').textContent=state.summary?.file_total?`${state.summary.file_total.toLocaleString()} 个文件`:'等待扫描';
+  $('flow-job').textContent=state.job?.message||'等待开始';
+  $('m-folders').textContent=Number(state.summary?.folder_total||0).toLocaleString();
+  $('m-files').textContent=Number(state.summary?.file_total||0).toLocaleString();
+  $('m-success').textContent=fileCount('success').toLocaleString();
+  const problem=fileCount('failed')+fileCount('changed')+fileCount('missing')+Number(state.summary?.folders?.failed||0);
+  $('m-failed').textContent=problem.toLocaleString();
+  const done=Number(state.job?.done||0),total=Number(state.job?.total||0);
+  $('progress-bar').style.width=total?`${Math.min(100,done/total*100)}%`:'0%';
+  $('job-message').textContent=state.job?.message||'等待开始';
+  $('job-current').textContent=state.job?.current||'';
+  $('target-note').innerHTML=state.target?.space_id
+    ?`已验证：<b>${esc(state.target.title||state.target.node_token)}</b><br>space_id: ${esc(state.target.space_id)}`
+    :'尚未验证目标。请提供知识库中的目标父节点链接，不要填云空间 folder 链接。';
+  const events=state.events||[];
+  $('log').innerHTML=events.length?events.map(e=>{
+    const t=(e.created_at||'').replace('T',' ').slice(11,19);
+    return `<div class="log-row"><span>${esc(t)}</span><b class="${esc(e.level)}">${esc(e.level)}</b><span>${esc(e.message)}${e.rel_path?` · ${esc(e.rel_path)}`:''}</span></div>`
+  }).join(''):'<div class="muted">暂无事件</div>';
+  $('log').scrollTop=$('log').scrollHeight;
+  const failures=state.failures||[];
+  $('failures').innerHTML=failures.length?failures.map(f=>`<div class="failure"><b>${esc(f.rel_path)}</b><span>${esc(f.error)}</span></div>`).join(''):'<div class="failure muted">暂无异常</div>';
+}
+async function refresh(){try{state=await api('/api/state');render()}catch(e){toast(e.message)}}
+async function saveConfig(){
+  try{
+    await api('/api/config','POST',{app_id:$('app-id').value,app_secret:$('app-secret').value,redirect_uri:$('redirect-uri').value});
+    $('app-secret').value='';toast('配置已保存');await refresh();
+  }catch(e){toast('保存失败：'+e.message)}
+}
+async function scanSource(reset){
+  const path=$('source-path').value.trim();if(!path)return toast('请填写本地目录');
+  try{
+    toast('正在扫描，请稍候…');
+    const r=await api('/api/scan','POST',{path,reset});
+    toast(`扫描完成：${r.folders} 个目录，${r.files} 个文件`);await refresh();
+  }catch(e){
+    if(e.message.includes('当前台账属于')&&confirm(e.message+'\n\n是否重置本地台账后扫描？飞书现有内容不会删除。'))return scanSource(true);
+    toast('扫描失败：'+e.message);
+  }
+}
+async function verifyTarget(){
+  const wiki_url=$('wiki-url').value.trim();if(!wiki_url)return toast('请填写目标知识库节点链接');
+  try{
+    const r=await api('/api/target','POST',{wiki_url,create_wrapper:$('create-wrapper').checked});
+    toast('目标验证成功：'+(r.title||r.node_token));await refresh();
+  }catch(e){toast('目标验证失败：'+e.message)}
+}
+async function startMigration(){
+  const files=Number(state.summary?.file_total||0);
+  if(!files)return toast('请先扫描本地目录');
+  if(!state.oauth?.authorized)return toast('请先完成飞书 OAuth 授权');
+  if(!state.target?.space_id)return toast('请先验证目标知识库');
+  if(!confirm(`即将迁移 ${files.toLocaleString()} 个文件，并在知识库中创建目录节点。\n\n已成功项会自动跳过，是否继续？`))return;
+  try{await api('/api/migration/start','POST',{});toast('迁移任务已启动');await refresh()}catch(e){toast(e.message)}
+}
+async function jobAction(action){try{await api('/api/migration/'+action,'POST',{});await refresh()}catch(e){toast(e.message)}}
+async function retryFailed(){try{const r=await api('/api/migration/retry','POST',{});toast(`已重新排队：目录 ${r.folders}，文件 ${r.files}`);await refresh()}catch(e){toast(e.message)}}
+refresh();setInterval(refresh,2500);
+</script>
+</body>
+</html>
