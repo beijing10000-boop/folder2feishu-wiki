@@ -3,7 +3,8 @@ param(
     [string]$PackagePath = "",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$GitHubToken = "",
-    [switch]$IncludePrerelease
+    [switch]$IncludePrerelease,
+    [switch]$NoBrowser
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +65,15 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Update installation failed with exit code $LASTEXITCODE."
     }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir "Start-Folder2Feishu.ps1")
+    $startArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $installDir "Start-Folder2Feishu.ps1")
+    )
+    if ($NoBrowser) {
+        $startArguments += "-NoBrowser"
+    }
+    & powershell.exe @startArguments
     Write-Host "Folder2Feishu update completed." -ForegroundColor Green
 }
 finally {
