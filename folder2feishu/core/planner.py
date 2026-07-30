@@ -270,14 +270,14 @@ class MigrationPlanner:
             action["order_index"] = index
         saved = self.store.save_plan(project_id, plan_id, actions)
         counts = Counter(action.action_type.value for action in saved)
+        upload_item_ids = {
+            action.inventory_item_id
+            for action in saved
+            if action.inventory_item_id
+            and action.action_type in {ActionType.UPLOAD, ActionType.VERSION_UPDATE}
+        }
         estimated_calls = sum(
-            _upload_calls(item.size)
-            for item in items
-            if any(
-                action.inventory_item_id == item.id
-                and action.action_type in {ActionType.UPLOAD, ActionType.VERSION_UPDATE}
-                for action in saved
-            )
+            _upload_calls(item.size) for item in items if item.id in upload_item_ids
         )
         blocked = bool(counts[ActionType.CONFLICT.value] or counts[ActionType.MANUAL_ACTION.value])
         # The application does not impose a daily upload-call ceiling.  Keep
