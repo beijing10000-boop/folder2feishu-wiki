@@ -61,6 +61,34 @@ def test_quota_capacity_accepts_unlimited_and_compatibility_list_name() -> None:
     assert "不限额" in message
 
 
+@pytest.mark.parametrize("unlimited", ["true", " TRUE ", 1])
+def test_quota_capacity_accepts_compatible_true_values(unlimited: object) -> None:
+    payload = _quota()
+    payload["biz_infos"][0]["unlimited"] = unlimited
+
+    ok, message = ApplicationServices._quota_capacity_check(
+        payload,
+        required_bytes=10_000_000,
+    )
+
+    assert ok is True
+    assert "不限额" in message
+
+
+@pytest.mark.parametrize("unlimited", ["false", " 0 ", 0])
+def test_quota_capacity_accepts_compatible_false_values(unlimited: object) -> None:
+    payload = _quota()
+    payload["biz_infos"][0]["unlimited"] = unlimited
+
+    ok, message = ApplicationServices._quota_capacity_check(
+        payload,
+        required_bytes=1,
+    )
+
+    assert ok is True
+    assert "容量充足" in message
+
+
 @pytest.mark.parametrize(
     "payload, expected",
     [
@@ -104,7 +132,7 @@ def test_quota_capacity_accepts_unlimited_and_compatibility_list_name() -> None:
                         "name": "ccm",
                         "used": "100",
                         "quota": "1000",
-                        "unlimited": "false",
+                        "unlimited": "not-a-boolean",
                     }
                 ],
                 "is_tenant_quota_exceeded": False,
