@@ -1,9 +1,11 @@
 # Folder2Feishu Wiki
 
-把 Windows 本地目录按原始层级迁移到飞书知识库。它只解决一件事：
+Windows 本地目录到飞书知识库的原目录迁移工具。
+
+它只读扫描 OneDrive 已下载到本机的目录，把根目录、子目录、空目录、原文件名和原文件格式保留到飞书知识库。飞书云盘仅作为 API 必需的临时中转；文件迁入成功后不留在中转目录。
 
 ```text
-本地根目录
+D:\Team FabDazzle - 文档
 ├─ Apparel
 │  ├─ Reports
 │  │  └─ weekly.xlsx
@@ -12,8 +14,8 @@
 
               ↓
 
-飞书知识库目标节点
-└─ 本地根目录
+飞书知识库目标父节点
+└─ Team FabDazzle - 文档
    ├─ Apparel
    │  ├─ Reports
    │  │  └─ weekly.xlsx
@@ -21,127 +23,156 @@
    └─ root.pdf
 ```
 
-不做 AI 分类，不把文件重新放进“制度、项目、会议”等模板目录。
+不使用 Claude，不做 AI 分类，不重组目录，也不把 Office/PDF 转换成飞书在线文档。
 
-## 主要能力
+## 下载与启动
 
-- 递归扫描本地目录，保留原始相对路径。
-- 将每个本地文件夹创建为一个空白 Docx 知识库节点，用作目录入口。
-- 文件以 OAuth 用户身份上传，再挂载到对应 Wiki 父节点。
-- 20 MB 以内直接上传；超过 20 MB 自动分片上传。
-- SQLite 台账记录目录节点、文件 token、Wiki token、SHA-256、状态和错误。
-- 可暂停、继续、停止；重启后已成功项自动跳过。
-- 失败项重新排队；中途断网或限流后无需从头开始。
-- 已成功迁移后发生变化的本地文件只标记为 `changed`，不会静默覆盖飞书内容。
-- 本地 Web 控制台仅监听 `127.0.0.1`。
+从 [Releases](https://github.com/beijing10000-boop/folder2feishu-wiki/releases) 下载：
 
-## 安装要求
+- `Folder2Feishu-Windows-x64-Setup-*.exe`：推荐，一键安装。
+- `Folder2Feishu-Windows-x64-Portable-*.zip`：解压后运行 `Folder2Feishu.exe`。
+- `SHA256SUMS.txt`：核对安装包和便携包完整性。
 
-- Windows 10/11
-- Python 3.11 或更高版本，推荐 Python 3.12
-- 飞书企业自建应用
-- 执行 OAuth 的飞书用户必须能编辑目标知识库节点
-- OneDrive 文件应尽量先完成本地下载，显示绿色对勾
+目标电脑不需要安装 Python、Git 或 GitHub CLI。程序默认打开 `http://127.0.0.1:8000`，且只监听本机。
+
+当前 RC 构建未配置商业代码签名证书，Windows SmartScreen 可能显示未知发布者；请只从本仓库 Release 下载并先核对 SHA-256。
+
+运行数据位于：
+
+```text
+%LOCALAPPDATA%\Folder2FeishuWiki
+├─ ledger.sqlite3
+├─ settings.json
+├─ credentials.bin
+├─ quota.json
+├─ logs\
+└─ exports\
+```
+
+这些文件禁止放进 OneDrive 同步目录。
 
 ## 飞书应用配置
 
-在飞书开放平台创建企业自建应用，并完成以下设置：
+在飞书开放平台创建企业自建应用，申请并发布以下 OAuth 权限：
 
-1. 权限管理中开通并发布：
-   - `wiki:wiki`：查看、编辑和管理知识库
-   - `drive:drive`：查看、评论、编辑和管理云空间中的文件
-   - `offline_access`：离线访问已授权数据
-2. 安全设置中添加 OAuth 重定向地址：
+```text
+offline_access
+drive:drive
+drive:file:upload
+wiki:wiki
+drive:quota_detail:read_one
+contact:user.employee_id:readonly
+```
 
-   ```text
-   http://localhost:8765/oauth/callback
-   ```
+`drive:file:upload` 同时覆盖上传后恢复原文件名所用的文件标题更新接口。最后一项是获取当前授权用户 `user_id` 的字段权限；飞书容量接口需要用该 ID 查询当前用户容量。早期原型中写过 `auth:user.id:read`，该名称并不适用于当前服务端用户信息接口。
 
-3. 发布应用版本。
-4. 确保进行 OAuth 授权的用户是目标知识库成员，并且对目标父节点具有编辑权限。
+在安全设置中添加完全一致的重定向地址：
 
-本工具使用 `user_access_token` 上传，因此不需要把个人云盘文件夹分享给机器人群。
+```text
+http://localhost:8000/oauth/callback
+```
 
-## Windows 使用方法
+授权用户还必须是目标知识库成员，并对目标父节点拥有容器编辑权限。上传、迁入、校验和后续增量始终使用同一个 OAuth 用户身份。
 
-1. 下载或克隆本仓库。
-2. 双击 `install.bat`。
-3. 双击 `start.bat`。
-4. 浏览器打开 `http://localhost:8765`。
-5. 填写 App ID、App Secret 和回调地址，保存。
-6. 点击“前往飞书授权”。
-7. 填写本地根目录，例如：
+App Secret、access token 和 refresh token 不会发送到前端或写入 SQLite；Windows 正式运行使用当前用户 DPAPI 加密保存。OAuth 使用 v2、PKCE、一次性 `state` 和 refresh token 轮换。
 
-   ```text
-   D:\TechStyle\Team FabDazzle - 文档
-   ```
+## 桌面端操作流程
 
-8. 填写目标知识库父节点链接，例如：
+程序打开后默认进入“配置”首页。飞书应用、OAuth、上传限流、本地来源、知识库目标、
+安全增量和计划任务共七组配置都在这一页完成。App、OAuth、本地根目录和 Wiki 目标旁
+均有独立验证按钮；“一键验证全部”会按顺序调用相同的真实后端验证。保存成功不等于
+验证通过，全部必要项重新验证通过后才会开放盘点。
 
-   ```text
-   https://example.feishu.cn/wiki/XdhSwsU7PiDZSak2WoIc2Qb8nDc
-   ```
+1. **配置**：填写七组设置，保存 App Secret，完成用户 OAuth，并逐项验证。
+2. **盘点**：只读扫描本地目录，确认文件、空目录、OneDrive 占位和人工处理项。
+3. **预检**：检查授权身份、容量、文件可读性、名称、大小、深度和单层节点数。
+4. **差异计划**：查看目录树、增量动作、预计上传调用量和预计迁移天数，确认后才允许写入。
+5. **运行与对账**：执行、暂停、恢复、失败重试、远端对账，并导出 CSV/JSON 审计报告。
 
-9. 扫描本地目录并检查文件数、目录数、OneDrive 离线文件数。
-10. 验证目标知识库。
-11. 建议先用小目录试迁，确认目录、文件名和权限后再迁移全部内容。
-12. 点击“开始 / 继续迁移”。
+本版本仅面向 Windows 桌面端，不包含移动端适配或移动端验收。
 
-## 大规模迁移说明
+正式全量迁移前必须先用 3–10 个代表文件做小批试迁，并包含三级目录、空目录和一个大于 20 MB 的文件。
 
-飞书“上传文件”接口单次上传上限为 20 MB、频率上限为 5 QPS，并有每天 10,000 次调用的限制。35,000 个文件通常不能在一天内全部完成，应按天续跑。达到限额后：
+## 迁移与恢复规则
 
-1. 等下一配额周期；
-2. 点击“失败项重新排队”；
-3. 点击“开始 / 继续迁移”。
+- 本地目录是独立对象；每个目录映射为一个空白 Docx 知识库节点。
+- 在用户云盘根目录创建 `Folder2Feishu-Staging/<项目ID>/<分片>` 中转目录。
+- 不超过 20 MB 的文件直接上传；更大的文件按 4 MB 分片，分片会话和完成序号即时落库。
+- 每个请求使用非空 `parent_node`。获得 `file_token`、`task_id`、`wiki_token` 后立即写入 SQLite。
+- 请求超时先查询远端状态；不会因为本地未及时落库就盲目重传。
+- 上传队列最高 4 QPS，Wiki 操作最高 90 次/分钟，每日上传预算为 9,500 次；达到预算自动暂停，下一次运行继续。
+- SQLite 启用 WAL、`busy_timeout`、schema migration 和项目级执行锁；同一个项目不能被两个实例同时执行。
+- 扫描不完整、预检阻断、计划未确认或发现远端人工改动时，执行器拒绝写入。
 
-已成功文件不会重复上传。
+## 安全增量
 
-迁移期间：
+- 路径和 SHA-256 都未改变：跳过。
+- Windows File ID 或唯一哈希一致、但路径改变：移动/改名现有 Wiki 节点，不重新上传。
+- 内容改变：完整上传并校验新文件；旧节点移入 `_Folder2Feishu_历史版本/<原目录>/<时间>`，新节点再进入原位置。
+- 本地删除：只生成缺失报告，不删除或移动飞书内容。
+- 飞书节点被人工改名、移动或删除：标记冲突，禁止自动覆盖。
+- 0 字节、超过飞书限制、名称超限、锁定文件或未下载的 OneDrive 占位文件：进入人工处理清单，不静默改名或忽略。
 
-- 禁止电脑自动睡眠。
-- `start.bat` 窗口需要保持运行；浏览器可以关闭。
-- 不要移动、重命名或删除本地根目录。
-- 不要同时运行多个迁移实例。
-- 定期检查“异常与人工处理”列表。
+第二次执行在来源与远端都未变化时应为零重复上传。
 
-## 幂等与同名节点
+## 无界面运行与计划任务
 
-- 本地 SQLite 台账是主要的断点依据。
-- 创建目录前会读取目标父节点的直接子节点；存在一个同名节点时会复用。
-- 同一父节点存在多个同名节点时，工具会停止该目录，避免误挂。
-- 建议使用空白、专用的目标知识库父节点。
-- 切换目标节点前应完成当前迁移或重置本地台账。
+手动无界面运行一个已配置项目：
 
-## 安全边界
+```powershell
+Folder2Feishu.exe --run-project <项目ID>
+```
 
-- `.env`、OAuth token、SQLite 台账和日志位于本地，均被 `.gitignore` 排除。
-- API 不向浏览器返回 App Secret 或 OAuth token。
-- 工具不会删除本地源文件。
-- 工具不会删除现有 Wiki 节点。
-- 默认忽略 `desktop.ini`、`Thumbs.db`、`.DS_Store`、Office `~$` 临时文件和符号链接。
-- 空文件无法通过飞书文件上传接口上传，会进入失败清单。
-- 本工具迁移原始文件，不会把 Office/PDF 自动转换为飞书原生文档。
-- SharePoint/NTFS 权限、版本历史、评论和共享链接不在本工具范围内。
+定时任务默认关闭。启用后，界面会为该项目创建 Windows 每日计划任务；计划任务仍会先扫描、预检和生成安全增量计划，不会绕过阻断项。
 
-## 开发与测试
+## 明确边界
+
+- 来源只处理本地文件和目录，不直接连接 SharePoint Graph。
+- 不修改或删除本地 OneDrive 文件。
+- 不迁移 SharePoint/NTFS 权限、版本历史、评论、共享链接或站点页面。
+- 不自动删除飞书节点。
+- Word、Excel、PowerPoint、PDF 等保留原格式，不转换成飞书原生文档。
+- 35,000 多文件受飞书租户配额和每日调用预算影响，通常需要跨多个自然日续跑。
+
+## 开发、测试和打包
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m ruff check folder2feishu tests
+.\.venv\Scripts\python.exe -m mypy folder2feishu
 .\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+
+cd frontend
+npm ci
+npm run lint
+npm test
+npm run build
+cd ..
+
+.\packaging\build-windows.ps1 -SkipInstaller
 ```
 
-## 参考
+完整性能测试默认跳过，可显式运行：
 
-- [飞书：上传文件](https://open.feishu.cn/document/server-docs/docs/drive-v1/upload/upload_all)
-- [飞书：获取知识空间节点信息](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node)
-- [飞书：获取知识空间子节点列表](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/list)
-- [飞书：获取 OAuth 授权码](https://open.feishu.cn/document/common-capabilities/sso/api/obtain-oauth-code)
-- 设计参考：[WZLlin/Feishu_Knowledge_Base_Migrator](https://github.com/WZLlin/Feishu_Knowledge_Base_Migrator)
+```powershell
+$env:FOLDER2FEISHU_RUN_SCALE_TEST = "1"
+.\.venv\Scripts\python.exe -m pytest tests\test_core_v2_scale.py
+```
+
+发布工作流会在 Windows 上运行后端检查、前端构建、独立 EXE 启动健康检查，并使用 Inno Setup 生成安装包。
+
+## Clean-room 说明
+
+项目参考了 [WZLlin/Feishu_Knowledge_Base_Migrator](https://github.com/WZLlin/Feishu_Knowledge_Base_Migrator) 的台账、重试和迁移控制思路。该参考仓库未提供许可证，因此本版本只参考公开行为与产品思路，所有实现均重新设计、独立编写，没有复制其源代码。
+
+## 官方接口
+
+- [OAuth v2 获取用户访问凭证](https://open.feishu.cn/document/authentication-management/access-token/get-user-access-token?lang=zh-CN)
+- [OAuth v2 刷新用户访问凭证](https://open.feishu.cn/document/authentication-management/access-token/refresh-user-access-token?lang=zh-CN)
+- [上传文件](https://open.feishu.cn/document/server-docs/docs/drive-v1/upload/upload_all)
+- [知识库 API](https://open.feishu.cn/document/ukTMukTMukTM/uUDN04SN0QjL1QDN/wiki-v2)
 
 ## License
 
-MIT
-
+[MIT](LICENSE)

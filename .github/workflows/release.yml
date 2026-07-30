@@ -1,0 +1,107 @@
+name: Publish Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag，例如 v1.0.0-rc.1"
+        required: true
+        type: string
+      prerelease:
+        description: "标记为预发布"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ("${{ inputs.tag }}" -notmatch '^v\d+\.\d+\.\d+(-rc\.\d+)?$') {
+            throw "Tag 必须符合 v1.0.0 或 v1.0.0-rc.1"
+          }
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Match tag to package version
+        shell: pwsh
+        run: |
+          $pyproject = Get-Content -LiteralPath "pyproject.toml" -Raw
+          $match = [regex]::Match($pyproject, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "无法从 pyproject.toml 读取版本号"
+          }
+          $expectedTag = "v" + $match.Groups[1].Value.Replace("rc", "-rc.")
+          if ("${{ inputs.tag }}" -ne $expectedTag) {
+            throw "请求的 tag 与包版本不一致：应为 $expectedTag"
+          }
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install build toolchain
+        shell: pwsh
+        run: |
+          python -m pip install -e ".[dev]"
+          choco install innosetup --no-progress --yes
+
+      - name: Backend quality checks
+        shell: pwsh
+        run: |
+          python -m ruff format --check folder2feishu tests
+          python -m ruff check folder2feishu tests
+          python -m mypy folder2feishu
+
+      - name: Build and verify release artifacts
+        shell: pwsh
+        run: ./packaging/build-windows.ps1 -SkipInstall
+
+      - name: Installer install, launch and uninstall test
+        shell: pwsh
+        run: ./packaging/Test-Installer.ps1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ inputs.tag }}-windows"
+          path: |
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ inputs.tag }}"
+          target_commitish: "${{ github.sha }}"
+          prerelease: "${{ inputs.prerelease }}"
+          generate_release_notes: true
+          files: |
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS.txt
