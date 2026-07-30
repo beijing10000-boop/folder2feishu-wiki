@@ -14,7 +14,6 @@ const apiMock = vi.hoisted(() => ({
   getPreflight: vi.fn(),
   getTree: vi.fn(),
   getPlan: vi.fn(),
-  getSchedule: vi.fn(),
   getAudit: vi.fn(),
   getRun: vi.fn(),
   saveSettings: vi.fn(),
@@ -30,8 +29,7 @@ const apiMock = vi.hoisted(() => ({
   startRun: vi.fn(),
   controlRun: vi.fn(),
   reconcile: vi.fn(),
-  exportAudit: vi.fn(),
-  saveSchedule: vi.fn()
+  exportAudit: vi.fn()
 }));
 
 vi.mock("./api/client", () => ({
@@ -69,7 +67,6 @@ function rejectOptionalProjectReads() {
   apiMock.getPreflight.mockRejectedValue(new Error("no preflight"));
   apiMock.getTree.mockRejectedValue(new Error("no tree"));
   apiMock.getPlan.mockRejectedValue(new Error("no plan"));
-  apiMock.getSchedule.mockRejectedValue(new Error("no schedule"));
   apiMock.getAudit.mockRejectedValue(new Error("no audit"));
 }
 
@@ -119,7 +116,6 @@ describe("配置优先迁移向导", () => {
     expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
     expect(screen.getByText("飞书应用与本机安全配置")).toBeInTheDocument();
     expect(screen.getByText("上传限流与每日调用预算")).toBeInTheDocument();
-    expect(screen.getByText("定时安全增量盘点")).toBeInTheDocument();
     expect(screen.getByText("唯一来源、唯一落点与安全增量")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证应用配置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证当前身份" })).toBeInTheDocument();
@@ -127,7 +123,6 @@ describe("配置优先迁移向导", () => {
     expect(screen.getByRole("button", { name: "验证本地目录配置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证知识库地址" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证安全策略" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "验证定时盘点设置" })).toBeInTheDocument();
 
     const rail = screen.getByLabelText("迁移步骤");
     const scanStep = within(rail).getByText("盘点").closest("button");
@@ -154,16 +149,13 @@ describe("配置优先迁移向导", () => {
       target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
-      mode: "safe_incremental",
-      schedule_enabled: false
+      mode: "safe_incremental"
     };
     apiMock.getSettings.mockResolvedValue(settings);
     apiMock.getAuthStatus.mockResolvedValue(auth);
     apiMock.listProjects.mockResolvedValue([project]);
-    apiMock.getSchedule.mockResolvedValue({ enabled: false, local_time: "02:30" });
     apiMock.saveSettings.mockResolvedValue(settings);
     apiMock.updateProject.mockResolvedValue(project);
-    apiMock.saveSchedule.mockResolvedValue({ enabled: false, local_time: "02:30" });
 
     render(<App />);
 

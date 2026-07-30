@@ -812,8 +812,7 @@ summary {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.quota-rule,
-.schedule-note {
+.quota-rule {
   min-height: 46px;
   display: flex;
   align-items: center;
@@ -833,16 +832,6 @@ summary {
 .quota-rule strong {
   margin-right: 0.35rem;
   color: var(--paper);
-}
-
-.schedule-note {
-  border-color: rgba(57, 217, 138, 0.16);
-  color: var(--green);
-  background: rgba(57, 217, 138, 0.025);
-}
-
-.schedule-note span {
-  color: var(--muted);
 }
 
 .operation-config > .button {

@@ -20,7 +20,6 @@ from . import __version__
 from .api_models import (
     ProjectCreate,
     ProjectUpdate,
-    ScheduleUpdate,
     SettingsUpdate,
     SourceVerifyRequest,
     TargetVerifyRequest,
@@ -43,7 +42,6 @@ from .feishu import FeishuError
 from .job_control import JobSnapshot
 from .quota import DailyQuotaStore
 from .runtime import bundled_path
-from .scheduler import ScheduleSpec
 from .settings import PublicSettings
 from .web_security import LocalRequestGuard, new_csrf_token
 
@@ -89,7 +87,6 @@ def _error(
 def _project_payload(services: ApplicationServices, project: Any) -> dict[str, Any]:
     runs = services.store.list_job_runs(project.id, limit=20)
     last_migration = next((run for run in runs if run.run_type == RunType.MIGRATION), None)
-    schedule = services.schedules.get(project.id)
     return {
         "id": project.id,
         "name": project.name,
@@ -101,8 +98,6 @@ def _project_payload(services: ApplicationServices, project: Any) -> dict[str, A
         "wrapper_name": project.wrapper_name,
         "incremental_mode": "safe",
         "mode": project.incremental_policy,
-        "schedule_enabled": schedule.enabled,
-        "schedule_time": schedule.local_time,
         "last_run_id": last_migration.id if last_migration else None,
         "status": project.status.value,
         "created_at": project.created_at.isoformat(),
@@ -396,7 +391,6 @@ def create_app(
     @app.patch("/api/v2/projects/{project_id}")
     def update_project(project_id: str, value: ProjectUpdate) -> dict[str, Any]:
         updates = value.model_dump(exclude_none=True)
-        schedule_enabled = updates.pop("schedule_enabled", None)
         create_wrapper = updates.pop("create_wrapper", None)
         if create_wrapper is False:
             raise ValueError("知识库迁移必须保留同名根包装节点")
@@ -409,15 +403,6 @@ def create_app(
             project = services.store.update_project(project_id, **updates)
         else:
             project = services.store.get_project(project_id)
-        if schedule_enabled is not None:
-            existing = services.schedules.get(project_id)
-            services.schedules.save(
-                ScheduleSpec(
-                    project_id=project_id,
-                    enabled=bool(schedule_enabled),
-                    local_time=existing.local_time,
-                )
-            )
         return _project_payload(services, project)
 
     @app.post("/api/v2/projects/{project_id}/scan")
@@ -677,23 +662,6 @@ def create_app(
             for action in services.store.list_plan_actions(project_id)
         ]
         return {"events": events, "items": items}
-
-    @app.get("/api/v2/projects/{project_id}/schedule")
-    def get_schedule(project_id: str) -> dict[str, Any]:
-        services.store.get_project(project_id)
-        return asdict(services.schedules.get(project_id))
-
-    @app.put("/api/v2/projects/{project_id}/schedule")
-    def put_schedule(project_id: str, value: ScheduleUpdate) -> dict[str, Any]:
-        services.store.get_project(project_id)
-        spec = services.schedules.save(
-            ScheduleSpec(
-                project_id=project_id,
-                enabled=value.enabled,
-                local_time=value.local_time,
-            )
-        )
-        return asdict(spec)
 
     root = static_root or bundled_path("frontend", "dist")
     assets = root / "assets"

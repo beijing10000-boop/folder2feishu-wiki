@@ -26,7 +26,7 @@ def _shared_path_lock(path: Path) -> threading.RLock:
 
 @contextmanager
 def _interprocess_path_lock(path: Path) -> Iterator[None]:
-    """Serialize quota read-modify-write across GUI and scheduled processes."""
+    """Serialize quota read-modify-write across UI and explicit headless processes."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f"{path.name}.lock")

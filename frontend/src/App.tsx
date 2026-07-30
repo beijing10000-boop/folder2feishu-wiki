@@ -3,7 +3,6 @@ import {
   ArrowRight,
   BadgeCheck,
   Boxes,
-  CalendarClock,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -37,7 +36,6 @@ import {
   Settings2,
   ShieldCheck,
   Square,
-  TimerReset,
   UploadCloud,
   Waypoints
 } from "lucide-react";
@@ -55,7 +53,6 @@ import type {
   RunItem,
   RunSummary,
   ScanResult,
-  SchedulePayload,
   Severity,
   StepId,
   TreeNode
@@ -178,8 +175,7 @@ type ValidationKey =
   | "throttle"
   | "source"
   | "target"
-  | "policy"
-  | "schedule";
+  | "policy";
 type ValidationStatus = "idle" | "checking" | "passed" | "failed";
 type ValidationState = Record<
   ValidationKey,
@@ -192,8 +188,7 @@ const emptyValidation: ValidationState = {
   throttle: { status: "idle", message: "尚未验证限流与每日预算" },
   source: { status: "idle", message: "尚未检查本地根目录配置" },
   target: { status: "idle", message: "尚未检查知识库地址" },
-  policy: { status: "idle", message: "尚未检查增量策略" },
-  schedule: { status: "idle", message: "尚未验证定时盘点设置" }
+  policy: { status: "idle", message: "尚未检查增量策略" }
 };
 
 function Panel({
@@ -446,10 +441,6 @@ function App() {
   const [run, setRun] = useState<RunSummary>();
   const [runItems, setRunItems] = useState<RunItem[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [schedule, setSchedule] = useState<SchedulePayload>({
-    enabled: false,
-    local_time: "02:30"
-  });
   const [validation, setValidation] = useState<ValidationState>(emptyValidation);
   const [actionFilter, setActionFilter] = useState<PlannedActionKind | "ALL">("ALL");
   const [runFilter, setRunFilter] = useState<"ALL" | "FAILED" | "ACTIVE">("ALL");
@@ -478,7 +469,6 @@ function App() {
         api.getPreflight(activeProject.id),
         api.getTree(activeProject.id),
         api.getPlan(activeProject.id),
-        api.getSchedule(activeProject.id),
         api.getAudit(activeProject.id),
         activeProject.last_run_id ? api.getRun(activeProject.last_run_id) : Promise.resolve(undefined)
       ]);
@@ -487,24 +477,11 @@ function App() {
       if (calls[2].status === "fulfilled") setTree(calls[2].value);
       if (calls[3].status === "fulfilled") setPlan(calls[3].value);
       if (calls[4].status === "fulfilled") {
-        const savedSchedule = calls[4].value;
-        setSchedule(savedSchedule);
-        setValidation((current) => ({
-          ...current,
-          schedule: {
-            status: "passed",
-            message: savedSchedule.enabled
-              ? `每日 ${savedSchedule.local_time} 自动盘点已配置`
-              : "定时盘点保持关闭（默认安全设置）"
-          }
-        }));
-      }
-      if (calls[5].status === "fulfilled") {
-        const audit = calls[5].value as { events?: AuditEvent[]; items?: RunItem[] };
+        const audit = calls[4].value as { events?: AuditEvent[]; items?: RunItem[] };
         setEvents(audit.events ?? []);
         setRunItems(audit.items ?? []);
       }
-      if (calls[6].status === "fulfilled" && calls[6].value) setRun(calls[6].value);
+      if (calls[5].status === "fulfilled" && calls[5].value) setRun(calls[5].value);
     },
     []
   );
@@ -568,12 +545,6 @@ function App() {
             message: activeProject
               ? "安全增量与同名根节点策略已固定"
               : "请确认安全增量选项"
-          },
-          schedule: {
-            status: "idle",
-            message: activeProject
-              ? "正在从后端回读定时盘点配置"
-              : "默认关闭；验证后才会纳入项目配置"
           }
         });
         if (activeProject) {
@@ -828,48 +799,6 @@ function App() {
     return true;
   };
 
-  const validateSchedule = async (activeProject = project): Promise<boolean> => {
-    markValidation("schedule", "checking", "正在验证并保存定时盘点配置…");
-    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(schedule.local_time)) {
-      markValidation("schedule", "failed", "本机执行时间必须为 00:00–23:59");
-      return false;
-    }
-    let scheduleProject = activeProject;
-    if (!scheduleProject && sourceConfigurationValid() && targetConfigurationValid()) {
-      try {
-        scheduleProject = await persistProject(true);
-      } catch (error) {
-        markValidation(
-          "schedule",
-          "failed",
-          error instanceof Error ? error.message : "项目尚未创建，无法保存计划任务"
-        );
-        return false;
-      }
-    }
-    if (!scheduleProject) {
-      markValidation("schedule", "failed", "请先完成本地来源与知识库落点配置");
-      return false;
-    }
-    try {
-      const saved = await api.saveSchedule(scheduleProject.id, schedule);
-      setSchedule(saved);
-      markValidation(
-        "schedule",
-        "passed",
-        saved.enabled ? `每日 ${saved.local_time} 自动盘点已配置` : "定时盘点保持关闭（默认安全设置）"
-      );
-      return true;
-    } catch (error) {
-      markValidation(
-        "schedule",
-        "failed",
-        error instanceof Error ? error.message : "计划任务设置保存失败"
-      );
-      return false;
-    }
-  };
-
   const validateAll = async (event?: FormEvent): Promise<void> => {
     event?.preventDefault();
     setBusy("validate-all");
@@ -893,12 +822,6 @@ function App() {
           projectOk = false;
         }
       }
-      let scheduleOk = false;
-      if (projectOk) {
-        scheduleOk = await validateSchedule(savedProject);
-      } else {
-        markValidation("schedule", "failed", "项目配置未保存，无法验证计划任务");
-      }
       const allPassed =
         appOk &&
         throttleOk &&
@@ -906,8 +829,7 @@ function App() {
         sourceOk &&
         targetOk &&
         policyOk &&
-        projectOk &&
-        scheduleOk;
+        projectOk;
       notify(
         allPassed
           ? "必要配置已全部验证，可以进入只读盘点。"
@@ -1067,20 +989,6 @@ function App() {
       const file = await api.exportAudit(project.id, format);
       downloadBlob(file, `Folder2Feishu_${project.name}_${new Date().toISOString().slice(0, 10)}.${format}`);
       notify(`审计${format.toUpperCase()}已导出。`);
-    } catch (error) {
-      showError(error);
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const saveSchedule = async () => {
-    if (!project) return;
-    setBusy("schedule");
-    try {
-      const saved = await api.saveSchedule(project.id, schedule);
-      setSchedule(saved);
-      notify(saved.enabled ? `已创建每日 ${saved.local_time} 的安全增量任务。` : "定时任务已关闭。");
     } catch (error) {
       showError(error);
     } finally {
@@ -1301,8 +1209,7 @@ function App() {
                     ["throttle", "03", "调用限额", "QPS / Wiki 频率 / 日预算"],
                     ["source", "04", "本地来源", "Windows 绝对路径"],
                     ["target", "05", "知识库落点", "Wiki 父节点 URL"],
-                    ["policy", "06", "安全策略", "根节点与安全增量"],
-                    ["schedule", "07", "定时盘点", "默认关闭 / 本机时间"]
+                    ["policy", "06", "安全策略", "根节点与安全增量"]
                   ] as Array<[ValidationKey, string, string, string]>
                 ).map(([key, no, label, detail]) => (
                   <article className={`validation-item is-${validation[key].status}`} key={key}>
@@ -1543,52 +1450,6 @@ function App() {
                 </div>
               </Panel>
 
-              <Panel tone={schedule.enabled ? "green" : ""}>
-                <PanelHeading
-                  eyebrow="WINDOWS TASK SCHEDULER"
-                  title="定时安全增量盘点"
-                  copy="默认关闭。启用后仅自动盘点差异，本地删除仍只生成缺失报告。"
-                  icon={CalendarClock}
-                  tools={<ValidationBadge {...validation.schedule} />}
-                />
-                <div className="operation-config">
-                  <Toggle
-                    checked={schedule.enabled}
-                    onChange={(enabled) => {
-                      setSchedule({ ...schedule, enabled });
-                      markValidation("schedule", "idle", "定时盘点开关已修改，请重新验证");
-                    }}
-                    label="启用 Windows 计划任务"
-                    description="每天调用无界面模式执行当前项目；不会自动确认新的写入计划。"
-                  />
-                  <Field label="本机执行时间" required hint="使用当前 Windows 电脑的本地时间。">
-                    <input
-                      type="time"
-                      value={schedule.local_time}
-                      onChange={(event) => {
-                        setSchedule({ ...schedule, local_time: event.target.value });
-                        markValidation("schedule", "idle", "定时执行时间已修改，请重新验证");
-                      }}
-                      disabled={!schedule.enabled}
-                    />
-                  </Field>
-                  <div className="schedule-note">
-                    <TimerReset size={17} />
-                    <span>
-                      {schedule.enabled
-                        ? `计划在每天 ${schedule.local_time} 盘点；项目创建后写入任务计划程序。`
-                        : "当前保持关闭；本页仍会验证默认安全状态。"}
-                    </span>
-                  </div>
-                  <Button
-                    icon={SearchCheck}
-                    busy={validation.schedule.status === "checking"}
-                    onClick={() => validateSchedule()}
-                  >
-                    验证定时盘点设置
-                  </Button>
-                </div>
-              </Panel>
             </div>
 
             <div className="view-grid view-grid--source config-second">
@@ -2282,26 +2143,6 @@ function App() {
                         </article>
                       )) : <p className="muted">暂无审计事件。</p>}
                     </div>
-                  </Panel>
-                  <Panel>
-                    <PanelHeading eyebrow="WINDOWS TASK SCHEDULER" title="每日安全增量" icon={CalendarClock} />
-                    <Toggle
-                      checked={schedule.enabled}
-                      onChange={(enabled) => setSchedule({ ...schedule, enabled })}
-                      label="启用计划任务"
-                      description="每天重新盘点；删除项只报告，不自动删除飞书内容。"
-                    />
-                    <Field label="本机执行时间">
-                      <input
-                        type="time"
-                        value={schedule.local_time}
-                        onChange={(event) => setSchedule({ ...schedule, local_time: event.target.value })}
-                        disabled={!schedule.enabled}
-                      />
-                    </Field>
-                    <Button icon={TimerReset} busy={busy === "schedule"} onClick={saveSchedule}>
-                      保存计划任务
-                    </Button>
                   </Panel>
                 </div>
               </div>

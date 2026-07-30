@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,13 +47,9 @@ class RuntimePaths:
 
 
 def bundled_path(*parts: str) -> Path:
-    """Resolve an immutable asset both from source and from PyInstaller."""
+    """Resolve an immutable asset from the Python application directory."""
 
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        root = Path(sys._MEIPASS)
-    else:
-        root = Path(__file__).resolve().parents[1]
-    return root.joinpath(*parts)
+    return Path(__file__).resolve().parents[1].joinpath(*parts)
 
 
 def assert_runtime_outside_source(runtime: RuntimePaths, source_root: str | Path) -> None:
