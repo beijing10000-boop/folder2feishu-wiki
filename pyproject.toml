@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "folder2feishu-wiki"
+version = "0.1.0"
+description = "Preserve a local folder hierarchy while migrating files to Feishu Wiki."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "folder2feishu-wiki contributors"}]
+dependencies = [
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "python-dotenv==1.1.1",
+  "python-multipart==0.0.20",
+  "uvicorn[standard]==0.35.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
