@@ -33,6 +33,7 @@ MAX_FEISHU_NAME_LENGTH = 250
 MAX_WIKI_LOCAL_DEPTH = 49
 MAX_WIKI_CHILDREN = 2_000
 HASH_BLOCK_SIZE = 4 * 1024 * 1024
+ONEDRIVE_INTERNAL_NAMES = frozenset({".849c9593-d756-4e56-8d6e-42412f2a707b"})
 
 
 class ScanCancelled(RuntimeError):
@@ -606,7 +607,12 @@ class InventoryScanner:
                     try:
                         with os.scandir(directory) as iterator:
                             entries = sorted(
-                                list(iterator), key=lambda value: value.name.casefold()
+                                (
+                                    entry
+                                    for entry in iterator
+                                    if entry.name.casefold() not in ONEDRIVE_INTERNAL_NAMES
+                                ),
+                                key=lambda value: value.name.casefold(),
                             )
                     except OSError as exc:
                         add_issue(

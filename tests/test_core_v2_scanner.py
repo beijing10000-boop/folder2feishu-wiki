@@ -61,6 +61,26 @@ def test_scanner_preserves_root_empty_directories_names_and_hashes(tmp_path):
         store.close()
 
 
+def test_scanner_ignores_onedrive_internal_sync_marker(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".849C9593-D756-4E56-8D6E-42412F2A707B").write_bytes(b"OneDrive internal")
+    (source / "business.txt").write_bytes(b"business")
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="OneDrive", source_root=source)
+        result = InventoryScanner(store).scan(project.id)
+
+        assert result.complete
+        assert result.files == 1
+        items = store.list_inventory(project.id, present=True)
+        assert {item.rel_path for item in items} == {"", "business.txt"}
+        assert not store.list_issues(project.id, scan_id=result.scan_id)
+    finally:
+        store.close()
+
+
 def test_cancelled_scan_is_incomplete_and_audited(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
