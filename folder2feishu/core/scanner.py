@@ -830,9 +830,9 @@ class InventoryScanner:
                 IssueCode.ZERO_BYTE_FILE,
                 IssueSeverity.WARNING,
                 (
-                    "Feishu Drive rejects empty uploads; this file will be represented "
-                    "by an empty Wiki document node with the original name"
+                    "Feishu Drive rejects empty uploads; this file will be reported "
+                    "and skipped without blocking the migration"
                 ),
                 rel_path,
-                details={"representation": "empty_wiki_docx", "source_size": 0},
+                details={"migration_policy": "report_and_skip", "source_size": 0},
             )

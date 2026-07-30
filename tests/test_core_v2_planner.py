@@ -190,7 +190,7 @@ def test_unique_hash_fallback_and_ambiguous_hash_are_safe(tmp_path):
         store.close()
 
 
-def test_zero_byte_is_planned_as_wiki_placeholder_and_partial_scan_cannot_be_planned(tmp_path):
+def test_zero_byte_is_reported_and_skipped_without_blocking_plan(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "empty.bin").write_bytes(b"")
@@ -204,9 +204,8 @@ def test_zero_byte_is_planned_as_wiki_placeholder_and_partial_scan_cannot_be_pla
             for action in store.list_plan_actions(project.id, plan_id=result.plan_id)
             if action.source_rel_path == "empty.bin"
         ][0]
-        assert zero_byte.action_type == ActionType.UPLOAD
-        assert zero_byte.details["zero_byte_placeholder"] is True
-        assert zero_byte.details["representation"] == "empty_wiki_docx"
+        assert zero_byte.action_type == ActionType.SKIP
+        assert zero_byte.details["zero_byte_skipped"] is True
         assert result.estimated_upload_calls == 0
         assert not result.blocked
 

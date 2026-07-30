@@ -279,7 +279,7 @@ def test_first_run_second_run_move_and_version_update(tmp_path: Path) -> None:
     )
 
 
-def test_zero_byte_file_becomes_idempotent_same_name_wiki_placeholder(
+def test_zero_byte_file_is_reported_and_skipped_without_remote_write(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "zero-byte-source"
@@ -298,7 +298,8 @@ def test_zero_byte_file_becomes_idempotent_same_name_wiki_placeholder(
         )
         InventoryScanner(store).scan(project.id)
         plan = MigrationPlanner(store).build(project.id)
-        assert plan.counts[ActionType.UPLOAD.value] == 1
+        assert plan.counts[ActionType.SKIP.value] == 1
+        assert plan.counts[ActionType.CREATE_FOLDER.value] == 1
         assert plan.estimated_upload_calls == 0
         _confirm(store, project.id)
 
@@ -313,14 +314,17 @@ def test_zero_byte_file_becomes_idempotent_same_name_wiki_placeholder(
         first = executor.execute(project.id)
         assert first.failed == first.conflicts == 0
         assert drive.uploads == 0
-        placeholder = next(
-            mapping
+        assert [
+            mapping.last_source_rel_path
             for mapping in store.list_remote_mappings(project.id)
-            if mapping.last_source_rel_path == "保留原名.empty"
+        ] == [""]
+        zero_action = next(
+            action
+            for action in store.list_plan_actions(project.id)
+            if action.source_rel_path == "保留原名.empty"
         )
-        assert placeholder.source_size == 0
-        assert placeholder.object_token.startswith("docx-")
-        assert wiki.nodes[placeholder.wiki_node_token]["title"] == "保留原名.empty"
+        assert zero_action.state == MigrationState.DONE
+        assert zero_action.details["zero_byte_skipped"] is True
 
         InventoryScanner(store).scan(project.id)
         unchanged = MigrationPlanner(store).build(project.id)
@@ -329,22 +333,45 @@ def test_zero_byte_file_becomes_idempotent_same_name_wiki_placeholder(
         executor.execute(project.id)
         assert drive.uploads == 0
 
-        renamed = source / "改名后.empty"
-        empty.rename(renamed)
-        InventoryScanner(store).scan(project.id)
-        rename_plan = MigrationPlanner(store).build(project.id)
-        assert rename_plan.counts[ActionType.RENAME.value] == 1
-        _confirm(store, project.id)
-        executor.execute(project.id)
-        assert drive.renames == []
-        current = next(
-            mapping
-            for mapping in store.list_remote_mappings(project.id)
-            if mapping.last_source_rel_path == "改名后.empty"
-        )
-        assert wiki.nodes[current.wiki_node_token]["title"] == "改名后.empty"
     finally:
         store.close()
+
+
+def test_file_changed_to_zero_bytes_leaves_existing_remote_node_unchanged(
+    tmp_path: Path,
+) -> None:
+    store, project_id, drive, wiki = _build(tmp_path)
+    executor = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        wiki,  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "zero-transition-quota.json"),
+    )
+    executor.execute(project_id)
+    before = next(
+        mapping
+        for mapping in store.list_remote_mappings(project_id)
+        if mapping.last_source_rel_path == "部门 A/中文 & report (1).xlsx"
+    )
+
+    source = Path(store.get_project(project_id).source_root)
+    (source / "部门 A" / "中文 & report (1).xlsx").write_bytes(b"")
+    InventoryScanner(store).scan(project_id)
+    plan = MigrationPlanner(store).build(project_id)
+    zero_action = next(
+        action
+        for action in store.list_plan_actions(project_id, plan_id=plan.plan_id)
+        if action.source_rel_path == "部门 A/中文 & report (1).xlsx"
+    )
+    assert zero_action.action_type == ActionType.SKIP
+    assert zero_action.details["remote_left_unchanged"] is True
+    _confirm(store, project_id)
+    executor.execute(project_id)
+
+    after = store.get_remote_mapping(before.id)
+    assert drive.uploads == 2
+    assert after.source_size == before.source_size
+    assert after.source_sha256 == before.source_sha256
 
 
 def test_resume_from_persisted_drive_token_does_not_reupload(

@@ -196,17 +196,13 @@ class MigrationPlanner:
                 )
                 continue
             if mapping is None:
+                zero_byte = item.kind == ItemKind.FILE and item.size == 0
                 action_type = (
-                    ActionType.CREATE_FOLDER if item.kind == ItemKind.FOLDER else ActionType.UPLOAD
-                )
-                zero_byte_details = (
-                    {
-                        "zero_byte_placeholder": True,
-                        "representation": "empty_wiki_docx",
-                        "source_size": 0,
-                    }
-                    if item.kind == ItemKind.FILE and item.size == 0
-                    else None
+                    ActionType.SKIP
+                    if zero_byte
+                    else ActionType.CREATE_FOLDER
+                    if item.kind == ItemKind.FOLDER
+                    else ActionType.UPLOAD
                 )
                 actions.append(
                     self._action(
@@ -214,11 +210,13 @@ class MigrationPlanner:
                         None,
                         action_type,
                         (
-                            "zero-byte source will become an empty Wiki document node"
-                            if zero_byte_details
+                            "Feishu does not support zero-byte files; report and skip"
+                            if zero_byte
                             else "source item has no remote mapping"
                         ),
-                        details=zero_byte_details,
+                        details=(
+                            {"zero_byte_skipped": True, "source_size": 0} if zero_byte else None
+                        ),
                     )
                 )
                 continue
@@ -471,13 +469,21 @@ class MigrationPlanner:
                 "remote mapping has no source hash baseline",
                 details=details,
             )
+        if item.size == 0:
+            details["zero_byte_skipped"] = True
+            details["source_size"] = 0
+            details["remote_left_unchanged"] = True
+            return MigrationPlanner._action(
+                item,
+                mapping,
+                ActionType.SKIP,
+                "Feishu does not support zero-byte files; keep the existing remote node unchanged",
+                details=details,
+            )
         if item.sha256 != mapping.source_sha256:
             details["content_changed"] = True
             details["relocation_also_required"] = path_changed
             details["replacement_strategy"] = "archive_old_then_upload_new"
-            if item.size == 0:
-                details["zero_byte_placeholder"] = True
-                details["representation"] = "empty_wiki_docx"
             return MigrationPlanner._action(
                 item,
                 mapping,
@@ -492,11 +498,8 @@ class MigrationPlanner:
             )
             details["remote_move_api"] = "wiki.move_node"
             if details["rename_during_move"] or action_type == ActionType.RENAME:
-                # A zero-byte source is represented by a Docx node because the
-                # Drive upload API rejects size=0. Other file titles belong to Drive.
-                details["remote_rename_api"] = (
-                    "wiki.rename_node" if mapping.source_size == 0 else "drive.rename_file"
-                )
+                # A raw file's title belongs to Drive, not Docx.
+                details["remote_rename_api"] = "drive.rename_file"
             return MigrationPlanner._action(
                 item,
                 mapping,
