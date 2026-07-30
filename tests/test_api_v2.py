@@ -123,6 +123,52 @@ def test_duplicate_scan_is_an_expected_conflict(
         services.close()
 
 
+def test_scan_status_does_not_materialize_the_complete_inventory_tree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.store.create_project(
+        name="large-inventory",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+    summary_calls = 0
+
+    def summary(_: str) -> dict:
+        nonlocal summary_calls
+        summary_calls += 1
+        return {
+            "files": 51_527,
+            "folders": 6_536,
+            "bytes": 307_000_000_000,
+            "scan_complete": True,
+        }
+
+    monkeypatch.setattr(services, "inventory_summary", summary)
+    monkeypatch.setattr(
+        services,
+        "inventory_tree",
+        lambda _: (_ for _ in ()).throw(AssertionError("scan status loaded the tree")),
+    )
+    app = create_app(services, static_root=Path("frontend/dist").resolve())
+    try:
+        with TestClient(app) as client:
+            response = client.get(f"/api/v2/projects/{project.id}/scan")
+    finally:
+        services.close()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["summary"]["files"] == 51_527
+    assert response.json()["tree"] == []
+    assert summary_calls == 1
+
+
 def test_retry_and_restart_resume_keep_the_original_plan(
     tmp_path: Path,
     monkeypatch,

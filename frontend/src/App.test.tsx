@@ -163,10 +163,13 @@ describe("配置优先迁移向导", () => {
       tree: []
     });
     apiMock.getTree.mockReturnValue(new Promise(() => undefined));
+    window.localStorage.setItem("folder2feishu:last-step", "scan");
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "盘点", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByText("51,527")).toBeInTheDocument();
+    expect(screen.getByText("正在生成目录预览")).toBeInTheDocument();
     expect(screen.queryByText("正在建立本机安全会话")).not.toBeInTheDocument();
   });
 
