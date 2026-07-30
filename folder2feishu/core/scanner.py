@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -62,6 +64,30 @@ class ScanResult:
     issues: int
     blocking_issues: int
     operational_errors: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedDigest:
+    file_identity: str
+    size: int
+    mtime_ns: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FileCandidate:
+    path: Path
+    rel_path: str
+    parent_rel_path: str
+    name: str
+    depth: int
+    stat_result: os.stat_result
+    file_attributes: int
+    is_offline: bool
+    is_recall_on_open: bool
+    is_recall_on_data_access: bool
+    file_identity: str | None
+    cached_sha256: str | None
 
 
 def portable_rel(path: Path, root: Path) -> str:
@@ -227,12 +253,82 @@ class InventoryScanner:
         *,
         batch_size: int = 500,
         progress_interval: int = 100,
+        hash_workers: int = 4,
+        hash_queue_size: int | None = None,
     ):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        if hash_workers < 1 or hash_workers > 16:
+            raise ValueError("hash_workers must be between 1 and 16")
         self.store = store
         self.batch_size = batch_size
         self.progress_interval = max(1, progress_interval)
+        self.hash_workers = hash_workers
+        self.hash_queue_size = max(hash_workers, hash_queue_size or hash_workers * 2)
+
+    def _digest_caches(
+        self,
+        project_id: str,
+    ) -> tuple[dict[str, _CachedDigest], dict[str, _CachedDigest]]:
+        """Load only reusable digests from the previous inventory.
+
+        A hash is reusable only when the stable file identity, size, and
+        nanosecond modification time all still match. Duplicate identities
+        (for example hard links or stale moved rows) are never used for
+        identity-only matching.
+        """
+
+        by_path: dict[str, _CachedDigest] = {}
+        by_identity: dict[str, _CachedDigest] = {}
+        duplicate_identities: set[str] = set()
+        for item in self.store.list_inventory(project_id, kind=ItemKind.FILE):
+            if (
+                not item.sha256
+                or not item.file_identity
+                or item.size is None
+                or item.mtime_ns is None
+            ):
+                continue
+            cached = _CachedDigest(
+                file_identity=item.file_identity,
+                size=int(item.size),
+                mtime_ns=int(item.mtime_ns),
+                sha256=item.sha256,
+            )
+            by_path[item.rel_path] = cached
+            if item.file_identity in by_identity:
+                duplicate_identities.add(item.file_identity)
+            else:
+                by_identity[item.file_identity] = cached
+        for identity in duplicate_identities:
+            by_identity.pop(identity, None)
+        return by_path, by_identity
+
+    @staticmethod
+    def _cached_digest(
+        rel_path: str,
+        *,
+        file_identity_value: str | None,
+        size: int,
+        mtime_ns: int,
+        by_path: dict[str, _CachedDigest],
+        by_identity: dict[str, _CachedDigest],
+    ) -> str | None:
+        if not file_identity_value:
+            return None
+        candidates = (
+            by_path.get(rel_path),
+            by_identity.get(file_identity_value),
+        )
+        for cached in candidates:
+            if (
+                cached
+                and cached.file_identity == file_identity_value
+                and cached.size == size
+                and cached.mtime_ns == mtime_ns
+            ):
+                return cached.sha256
+        return None
 
     def scan(
         self,
@@ -244,6 +340,7 @@ class InventoryScanner:
     ) -> ScanResult:
         project = self.store.get_project(project_id)
         root = Path(source_root or project.source_root).expanduser().absolute()
+        digest_by_path, digest_by_identity = self._digest_caches(project_id)
         scan_id = uuid.uuid4().hex
         run = self.store.create_job_run(
             project_id,
@@ -270,6 +367,15 @@ class InventoryScanner:
         item_batch: list[dict[str, Any]] = []
         issue_batch: list[dict[str, Any]] = []
         cancelled = False
+        hash_stats = {
+            "hashes_computed": 0,
+            "hashes_reused": 0,
+        }
+        hash_executor = ThreadPoolExecutor(
+            max_workers=self.hash_workers,
+            thread_name_prefix="folder2feishu-hash",
+        )
+        pending_hashes: deque[tuple[_FileCandidate, Future[str]]] = deque()
 
         def flush() -> None:
             if item_batch:
@@ -321,6 +427,102 @@ class InventoryScanner:
         def check_cancel() -> None:
             if _is_cancelled(cancel):
                 raise ScanCancelled("scan cancelled")
+
+        def record_file(candidate: _FileCandidate, digest: str | None) -> None:
+            size = int(candidate.stat_result.st_size)
+            manual = (
+                size == 0
+                or candidate.is_offline
+                or candidate.is_recall_on_open
+                or candidate.is_recall_on_data_access
+                or digest is None
+                or len(candidate.name) > MAX_FEISHU_NAME_LENGTH
+                or candidate.depth > MAX_WIKI_LOCAL_DEPTH
+            )
+            item_batch.append(
+                {
+                    "kind": ItemKind.FILE,
+                    "rel_path": candidate.rel_path,
+                    "parent_rel_path": candidate.parent_rel_path,
+                    "name": candidate.name,
+                    "depth": candidate.depth,
+                    "file_identity": candidate.file_identity,
+                    "size": size,
+                    "mtime_ns": int(candidate.stat_result.st_mtime_ns),
+                    "sha256": digest,
+                    "file_attributes": candidate.file_attributes,
+                    "is_offline": candidate.is_offline,
+                    "is_recall_on_open": candidate.is_recall_on_open,
+                    "is_recall_on_data_access": candidate.is_recall_on_data_access,
+                    "state": (
+                        InventoryState.MANUAL_ACTION if manual else InventoryState.DISCOVERED
+                    ),
+                }
+            )
+            counts["files"] += 1
+            counts["bytes"] += size
+            self._add_preflight_issues(
+                add_issue,
+                name=candidate.name,
+                rel_path=candidate.rel_path,
+                depth=candidate.depth,
+                is_file=True,
+                size=size,
+                offline=candidate.is_offline,
+                recall_open=candidate.is_recall_on_open,
+                recall_data=candidate.is_recall_on_data_access,
+            )
+            if len(item_batch) >= self.batch_size:
+                flush()
+            emit_progress(candidate.rel_path)
+
+        def finish_hash(candidate: _FileCandidate, future: Future[str]) -> None:
+            digest: str | None = None
+            try:
+                digest = future.result()
+                hash_stats["hashes_computed"] += 1
+            except ScanCancelled:
+                raise
+            except OSError as exc:
+                add_issue(
+                    IssueCode.HASH_ERROR,
+                    IssueSeverity.BLOCKING,
+                    f"cannot hash file: {exc}",
+                    candidate.rel_path,
+                    details=_error_details(exc, candidate.path),
+                    operational=True,
+                )
+            record_file(candidate, digest)
+
+        def drain_hashes(*, force: bool = False) -> None:
+            while pending_hashes and (force or len(pending_hashes) >= self.hash_queue_size):
+                check_cancel()
+                candidate, future = pending_hashes.popleft()
+                finish_hash(candidate, future)
+
+        def queue_file(candidate: _FileCandidate) -> None:
+            if candidate.cached_sha256 is not None:
+                hash_stats["hashes_reused"] += 1
+                record_file(candidate, candidate.cached_sha256)
+                return
+            if (
+                candidate.is_offline
+                or candidate.is_recall_on_open
+                or candidate.is_recall_on_data_access
+            ):
+                record_file(candidate, None)
+                return
+            pending_hashes.append(
+                (
+                    candidate,
+                    hash_executor.submit(
+                        sha256_file,
+                        candidate.path,
+                        cancel_check=lambda: _is_cancelled(cancel),
+                    ),
+                )
+            )
+            drain_hashes()
 
         try:
             if not root.is_dir():
@@ -472,78 +674,43 @@ class InventoryScanner:
                             file_attrs
                         )
                         source_path = Path(entry.path)
-                        digest: str | None = None
-                        if not (file_offline or file_recall_open or file_recall_data):
-                            try:
-                                digest = sha256_file(
-                                    source_path,
-                                    cancel_check=lambda: _is_cancelled(cancel),
-                                )
-                            except ScanCancelled:
-                                raise
-                            except OSError as exc:
-                                add_issue(
-                                    IssueCode.HASH_ERROR,
-                                    IssueSeverity.BLOCKING,
-                                    f"cannot hash file: {exc}",
-                                    child_rel,
-                                    details=_error_details(exc, source_path),
-                                    operational=True,
-                                )
-
                         size = int(stat_result.st_size)
                         file_depth = depth + 1
-                        manual = (
-                            size == 0
-                            or file_offline
-                            or file_recall_open
-                            or file_recall_data
-                            or digest is None
-                            or len(entry.name) > MAX_FEISHU_NAME_LENGTH
-                            or file_depth > MAX_WIKI_LOCAL_DEPTH
+                        identity = (
+                            None
+                            if file_offline or file_recall_open or file_recall_data
+                            else file_identity(stat_result, source_path)
                         )
-                        item_batch.append(
-                            {
-                                "kind": ItemKind.FILE,
-                                "rel_path": child_rel,
-                                "parent_rel_path": rel_path,
-                                "name": entry.name,
-                                "depth": file_depth,
-                                "file_identity": (
-                                    None
-                                    if file_offline or file_recall_open or file_recall_data
-                                    else file_identity(stat_result, source_path)
-                                ),
-                                "size": size,
-                                "mtime_ns": int(stat_result.st_mtime_ns),
-                                "sha256": digest,
-                                "file_attributes": file_attrs,
-                                "is_offline": file_offline,
-                                "is_recall_on_open": file_recall_open,
-                                "is_recall_on_data_access": file_recall_data,
-                                "state": (
-                                    InventoryState.MANUAL_ACTION
-                                    if manual
-                                    else InventoryState.DISCOVERED
-                                ),
-                            }
-                        )
-                        counts["files"] += 1
-                        counts["bytes"] += size
-                        self._add_preflight_issues(
-                            add_issue,
-                            name=entry.name,
-                            rel_path=child_rel,
-                            depth=file_depth,
-                            is_file=True,
+                        cached_sha256 = self._cached_digest(
+                            child_rel,
+                            file_identity_value=identity,
                             size=size,
-                            offline=file_offline,
-                            recall_open=file_recall_open,
-                            recall_data=file_recall_data,
+                            mtime_ns=int(stat_result.st_mtime_ns),
+                            by_path=digest_by_path,
+                            by_identity=digest_by_identity,
                         )
-                        if len(item_batch) >= self.batch_size:
-                            flush()
-                        emit_progress(child_rel)
+                        if cached_sha256 is not None:
+                            try:
+                                with source_path.open("rb") as stream:
+                                    stream.read(1)
+                            except OSError:
+                                cached_sha256 = None
+                        queue_file(
+                            _FileCandidate(
+                                path=source_path,
+                                rel_path=child_rel,
+                                parent_rel_path=rel_path,
+                                name=entry.name,
+                                depth=file_depth,
+                                stat_result=stat_result,
+                                file_attributes=file_attrs,
+                                is_offline=file_offline,
+                                is_recall_on_open=file_recall_open,
+                                is_recall_on_data_access=file_recall_data,
+                                file_identity=identity,
+                                cached_sha256=cached_sha256,
+                            )
+                        )
 
                     # Reverse insertion keeps case-insensitive ascending traversal
                     # while still using a bounded depth-first stack.
@@ -551,6 +718,7 @@ class InventoryScanner:
                     if len(item_batch) >= self.batch_size:
                         flush()
                     emit_progress(rel_path)
+                drain_hashes(force=True)
         except ScanCancelled:
             cancelled = True
             add_issue(
@@ -562,11 +730,13 @@ class InventoryScanner:
             )
         finally:
             flush()
+            hash_executor.shutdown(wait=True, cancel_futures=True)
 
         complete = not cancelled and counts["operational_errors"] == 0
         project_status = ProjectStatus.SCANNED if complete else ProjectStatus.BLOCKED
         summary = {
             **counts,
+            **hash_stats,
             "complete": complete,
             "cancelled": cancelled,
             "source_root": str(root),

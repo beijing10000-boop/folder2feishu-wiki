@@ -108,6 +108,8 @@ export interface InventorySummary {
   max_depth: number;
   max_siblings: number;
   upload_calls: number;
+  hashes_computed?: number;
+  hashes_reused?: number;
   estimated_days: number;
   scan_complete: boolean;
 }

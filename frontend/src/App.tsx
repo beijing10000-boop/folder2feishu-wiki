@@ -125,6 +125,18 @@ const steps: Array<{
   }
 ];
 
+const STEP_STORAGE_KEY = "folder2feishu:last-step";
+const validSteps = new Set<StepId>(steps.map((item) => item.id));
+
+const readSavedStep = (): StepId => {
+  try {
+    const saved = window.localStorage.getItem(STEP_STORAGE_KEY) as StepId | null;
+    return saved && validSteps.has(saved) ? saved : "config";
+  } catch {
+    return "config";
+  }
+};
+
 const severityIcon: Record<Severity, typeof CheckCircle2> = {
   ok: CheckCircle2,
   warning: AlertTriangle,
@@ -423,7 +435,7 @@ function TreeBranch({ node, level = 0 }: { node: TreeNode; level?: number }) {
 }
 
 function App() {
-  const [step, setStep] = useState<StepId>("config");
+  const [step, setStep] = useState<StepId>(readSavedStep);
   const [version, setVersion] = useState("2.0");
   const [settings, setSettings] = useState<AppSettings>(emptySettings);
   const [secret, setSecret] = useState("");
@@ -488,6 +500,14 @@ function App() {
     },
     []
   );
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(STEP_STORAGE_KEY, step);
+    } catch {
+      // Navigation persistence is a convenience only; the migration must work without it.
+    }
+  }, [step]);
 
   useEffect(() => {
     let alive = true;
@@ -560,6 +580,8 @@ function App() {
             wrapper_name: activeProject.wrapper_name ?? ""
           });
           await loadProjectData(activeProject);
+        } else {
+          setStep("config");
         }
       } catch (error) {
         if (alive) showError(error);
@@ -1037,6 +1059,42 @@ function App() {
     }
   };
 
+  const refreshCurrentPage = async () => {
+    setBusy("page-refresh");
+    try {
+      const [health, currentSettings, currentAuth, projects] = await Promise.all([
+        api.health(),
+        api.getSettings(),
+        api.getAuthStatus(),
+        api.listProjects()
+      ]);
+      setVersion(health.version);
+      setSettings(currentSettings);
+      setAuth(currentAuth);
+      const activeProject =
+        projects.find((item) => item.id === project?.id) ?? projects[0];
+      if (activeProject) {
+        setProject(activeProject);
+        setDraft({
+          name: activeProject.name,
+          source_root: activeProject.source_root,
+          target_wiki_url: activeProject.target_wiki_url,
+          create_wrapper: true,
+          wrapper_name: activeProject.wrapper_name ?? ""
+        });
+        await loadProjectData(activeProject);
+      } else {
+        setProject(undefined);
+        setStep("config");
+      }
+      notify("当前页面数据已刷新，所在步骤保持不变。");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy("");
+    }
+  };
+
   const configReady =
     Boolean(project) &&
     (Object.values(validation) as ValidationState[ValidationKey][]).every(
@@ -1132,6 +1190,21 @@ function App() {
           <span className="route-destination"><Boxes size={15} /> FEISHU WIKI</span>
         </div>
         <div className="topbar__status">
+          <button
+            type="button"
+            className="page-refresh"
+            onClick={refreshCurrentPage}
+            disabled={busy === "page-refresh"}
+            aria-label="刷新当前页面数据"
+            title="重新读取本机台账和飞书状态，不离开当前步骤"
+          >
+            <RefreshCcw
+              className={busy === "page-refresh" ? "spin" : ""}
+              size={15}
+              aria-hidden="true"
+            />
+            <span>{busy === "page-refresh" ? "刷新中" : "刷新当前页"}</span>
+          </button>
           {api.isDemo ? <span className="demo-flag">DEMO DATA</span> : null}
           <span className={`live-signal ${auth.authorized ? "is-live" : ""}`}>
             <i />
@@ -1743,7 +1816,18 @@ function App() {
                 <div className="metric-grid">
                   <Metric icon={File} label="文件" value={scan.summary.files.toLocaleString()} />
                   <Metric icon={Folder} label="目录" value={scan.summary.folders.toLocaleString()} />
-                  <Metric icon={HardDrive} label="数据量" value={formatBytes(scan.summary.bytes)} />
+                  <Metric
+                    icon={HardDrive}
+                    label="数据量"
+                    value={formatBytes(scan.summary.bytes)}
+                    note={
+                      scan.summary.hashes_reused
+                        ? `已复用 ${scan.summary.hashes_reused.toLocaleString()} 个文件哈希`
+                        : scanActive
+                          ? "首次盘点采用 4 路并发读取"
+                          : "文件内容已完成校验"
+                    }
+                  />
                   <Metric
                     icon={Cloud}
                     label="OneDrive 占位"
