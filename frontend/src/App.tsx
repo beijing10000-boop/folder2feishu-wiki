@@ -1867,7 +1867,7 @@ function App() {
                       <PanelHeading
                         eyebrow="INVENTORY EVIDENCE"
                         title="本地完整性检查"
-                        copy="发现占位、不可读、零字节或超限对象时，不会静默跳过。"
+                        copy="占位、不可读或超限对象会阻断；0 字节文件将以同名空白知识库节点保留。"
                         icon={SearchCheck}
                       />
                       <div className="inventory-findings">
@@ -1979,7 +1979,7 @@ function App() {
                     <PanelHeading
                       eyebrow="GUARD RAIL MATRIX"
                       title="预检矩阵"
-                      copy="阻断项必须清零；警告项会进入人工处理清单。"
+                      copy="阻断项必须清零；警告项会说明自动处理方式或需要关注的边界。"
                       icon={ShieldCheck}
                     />
                     <div className="check-grid">

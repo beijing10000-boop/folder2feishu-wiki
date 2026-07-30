@@ -60,6 +60,8 @@ def _relocation_type(previous: str, current: str) -> ActionType:
 
 
 def _upload_calls(size: int | None) -> int:
+    if size == 0:
+        return 0
     if size is None or size <= DIRECT_UPLOAD_LIMIT:
         return 1
     return 2 + math.ceil(size / CHUNK_SIZE)
@@ -197,12 +199,26 @@ class MigrationPlanner:
                 action_type = (
                     ActionType.CREATE_FOLDER if item.kind == ItemKind.FOLDER else ActionType.UPLOAD
                 )
+                zero_byte_details = (
+                    {
+                        "zero_byte_placeholder": True,
+                        "representation": "empty_wiki_docx",
+                        "source_size": 0,
+                    }
+                    if item.kind == ItemKind.FILE and item.size == 0
+                    else None
+                )
                 actions.append(
                     self._action(
                         item,
                         None,
                         action_type,
-                        "source item has no remote mapping",
+                        (
+                            "zero-byte source will become an empty Wiki document node"
+                            if zero_byte_details
+                            else "source item has no remote mapping"
+                        ),
+                        details=zero_byte_details,
                     )
                 )
                 continue
@@ -459,6 +475,9 @@ class MigrationPlanner:
             details["content_changed"] = True
             details["relocation_also_required"] = path_changed
             details["replacement_strategy"] = "archive_old_then_upload_new"
+            if item.size == 0:
+                details["zero_byte_placeholder"] = True
+                details["representation"] = "empty_wiki_docx"
             return MigrationPlanner._action(
                 item,
                 mapping,
@@ -473,8 +492,11 @@ class MigrationPlanner:
             )
             details["remote_move_api"] = "wiki.move_node"
             if details["rename_during_move"] or action_type == ActionType.RENAME:
-                # A raw file's title belongs to Drive, not Docx.
-                details["remote_rename_api"] = "drive.rename_file"
+                # A zero-byte source is represented by a Docx node because the
+                # Drive upload API rejects size=0. Other file titles belong to Drive.
+                details["remote_rename_api"] = (
+                    "wiki.rename_node" if mapping.source_size == 0 else "drive.rename_file"
+                )
             return MigrationPlanner._action(
                 item,
                 mapping,

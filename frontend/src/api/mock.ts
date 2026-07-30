@@ -124,7 +124,7 @@ const tree: TreeNode[] = [
         relative_path: "旧资料索引.txt",
         kind: "file",
         size: 0,
-        status: "MANUAL_ACTION"
+        status: "PLANNED"
       }
     ]
   }
@@ -156,7 +156,7 @@ const checks = [
   {
     code: "ZERO_BYTE",
     title: "0 字节文件",
-    message: "3 个文件不能上传，将进入人工处理清单",
+    message: "3 个文件将以同名空白知识库节点保留，不占用 Drive 上传调用",
     severity: "warning" as const,
     count: 3,
     blocking: false
@@ -373,7 +373,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "1.0.0-rc.4-demo",
+      version: "1.0.0-rc.5-demo",
       database: "ok"
     } as T;
   }

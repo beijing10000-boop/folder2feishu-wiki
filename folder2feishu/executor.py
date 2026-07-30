@@ -577,6 +577,13 @@ class MigrationExecutor:
     ) -> tuple[str, str]:
         source = self._verify_source_unchanged(project, item)
         parent_token = wiki_parent_override or self._destination_parent(project, item.rel_path)
+        if item.size == 0:
+            return self._create_zero_byte_placeholder(
+                project,
+                action,
+                item,
+                parent_token=parent_token,
+            )
         hooks = LedgerPersistenceHooks(
             self.store,
             project_id=project.id,
@@ -663,6 +670,75 @@ class MigrationExecutor:
             raise MigrationBlocked("文件迁入后远端对账不一致：" + ",".join(result.differences))
         return file_token, wiki_token
 
+    def _create_zero_byte_placeholder(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+        *,
+        parent_token: str,
+    ) -> tuple[str, str]:
+        """Represent an empty local file without fabricating file content.
+
+        Feishu Drive rejects ``size=0``.  A same-name empty Docx node is the
+        only lossless-in-bytes representation available in Wiki: the local
+        path and name remain visible while the ledger records that no Drive
+        file was uploaded.
+        """
+
+        current = self.store.get_plan_action(action.id)
+        wiki_token = current.wiki_node_token
+        object_token = current.object_token
+        if wiki_token:
+            result = self.wiki.reconcile_node(
+                wiki_token,
+                expected_space_id=project.target_space_id,
+                expected_parent_token=parent_token,
+                expected_title=item.name,
+                expected_obj_token=object_token or None,
+            )
+            if result.status == ReconcileStatus.MATCH:
+                return object_token, wiki_token
+            if result.status == ReconcileStatus.CONFLICT:
+                raise MigrationBlocked("0 字节占位节点被人工修改：" + ",".join(result.differences))
+            raise MigrationBlocked("已记录的 0 字节占位节点已不存在")
+
+        self.store.update_plan_action(
+            action.id,
+            state=MigrationState.WIKI_MOVING,
+            merge_details={
+                "zero_byte_placeholder": True,
+                "representation": "empty_wiki_docx",
+                "source_size": 0,
+                "drive_upload_skipped": True,
+            },
+        )
+        node = self.wiki.ensure_docx_node(
+            project.target_space_id,
+            item.name,
+            parent_token,
+        )
+        wiki_token = str(node.get("node_token") or "")
+        object_token = str(node.get("obj_token") or "")
+        if not wiki_token or not object_token:
+            raise MigrationBlocked("飞书未返回完整的 0 字节占位节点标识")
+        self.store.update_plan_action(
+            action.id,
+            state=MigrationState.VERIFYING,
+            wiki_node_token=wiki_token,
+            object_token=object_token,
+        )
+        result = self.wiki.reconcile_node(
+            wiki_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=parent_token,
+            expected_title=item.name,
+            expected_obj_token=object_token,
+        )
+        if result.status != ReconcileStatus.MATCH:
+            raise MigrationBlocked("0 字节占位节点远端对账失败：" + ",".join(result.differences))
+        return object_token, wiki_token
+
     def _reserve_upload_attempt(self) -> None:
         # Called by FeishuAPIClient immediately before every actual upload HTTP
         # attempt, including controlled 429/1061045 and multipart retries.
@@ -709,7 +785,7 @@ class MigrationExecutor:
 
         if not already_applied and mapping.remote_title != item.name:
             try:
-                if item.kind == ItemKind.FILE:
+                if item.kind == ItemKind.FILE and mapping.source_size != 0:
                     if not mapping.object_token:
                         raise MigrationBlocked("原格式文件映射缺少 Drive 对象 token")
                     self.drive.rename_file(mapping.object_token, item.name, object_type="file")
