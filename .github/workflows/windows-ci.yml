@@ -1,0 +1,75 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main, "codex/**", "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Python package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Backend quality and tests
+        shell: pwsh
+        run: |
+          python -m ruff check folder2feishu tests
+          python -m mypy folder2feishu
+          python -m pytest
+
+      - name: Frontend install, test and build
+        working-directory: frontend
+        shell: pwsh
+        run: |
+          npm ci --no-audit --no-fund
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Build portable Windows artifact
+        shell: pwsh
+        run: ./packaging/build-windows.ps1 -SkipInstall -SkipTests -SkipInstaller
+
+      - name: Executable smoke test
+        shell: pwsh
+        run: ./packaging/Test-PackagedApp.ps1
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Folder2Feishu-Windows-x64
+          path: |
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

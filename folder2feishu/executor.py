@@ -1,0 +1,1094 @@
+"""Durable migration execution and remote reconciliation."""
+
+from __future__ import annotations
+
+import threading
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+
+from .core import (
+    ActionType,
+    AuditLevel,
+    CoreStore,
+    InventoryItem,
+    ItemKind,
+    LedgerPersistenceHooks,
+    MigrationState,
+    PlannedAction,
+    Project,
+    ProjectStatus,
+    RemoteMapping,
+    RemoteStatus,
+    RunStatus,
+    RunType,
+)
+from .core.models import utc_now
+from .core.scanner import sha256_file
+from .feishu import (
+    DriveService,
+    FeishuAmbiguousWriteError,
+    FeishuError,
+    ReconcileStatus,
+    WikiMoveTaskFailedError,
+    WikiService,
+    deterministic_staging_name,
+)
+from .job_control import JobControl, JobStopped
+from .quota import DailyQuotaExceeded, DailyQuotaStore
+
+
+class MigrationBlocked(RuntimeError):
+    """The plan or remote state requires an operator decision."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResult:
+    run_id: str
+    total: int
+    completed: int
+    skipped: int
+    failed: int
+    conflicts: int
+    quota_paused: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileSummary:
+    checked: int
+    matched: int
+    missing: int
+    conflicts: int
+
+
+ProgressCallback = Callable[..., None]
+PROJECT_WRITE_LEASE = "migration"
+PROJECT_LEASE_TTL_SECONDS = 120
+PROJECT_LEASE_HEARTBEAT_SECONDS = 30.0
+
+
+def _parent_rel_path(rel_path: str) -> str | None:
+    if rel_path == "":
+        return None
+    return rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""
+
+
+def _safe_source_path(project: Project, item: InventoryItem) -> Path:
+    root = Path(project.source_root).expanduser().resolve()
+    candidate = root.joinpath(*PurePosixPath(item.rel_path).parts).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise MigrationBlocked("源文件路径越出了项目根目录")
+    return candidate
+
+
+def _assert_fixed_oauth_identity(project: Project, drive: DriveService) -> None:
+    if not project.identity_key:
+        raise MigrationBlocked("项目尚未绑定固定 OAuth 用户，请重新完成预检")
+    user_info = drive.get_current_user_info()
+    current_user_id = str(user_info.get("user_id") or "")
+    if not current_user_id:
+        raise MigrationBlocked("飞书未返回当前 OAuth 用户的 user_id，请检查用户身份读取权限")
+    if current_user_id != project.identity_key:
+        raise MigrationBlocked("当前 OAuth 用户与项目绑定身份不一致，已在任何远端写入前停止")
+
+
+class _ProjectLeaseHeartbeat:
+    """Keep the cross-process project writer lease alive during long API calls."""
+
+    def __init__(
+        self,
+        store: CoreStore,
+        project_id: str,
+        owner_id: str,
+        *,
+        ttl_seconds: int = PROJECT_LEASE_TTL_SECONDS,
+        interval_seconds: float = PROJECT_LEASE_HEARTBEAT_SECONDS,
+    ) -> None:
+        if ttl_seconds <= 0 or interval_seconds <= 0 or interval_seconds >= ttl_seconds:
+            raise ValueError("project lease heartbeat interval must be shorter than its TTL")
+        self.store = store
+        self.project_id = project_id
+        self.owner_id = owner_id
+        self.ttl_seconds = ttl_seconds
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._failure: BaseException | None = None
+        self._failure_lock = threading.Lock()
+
+    def start(self) -> None:
+        self.store.acquire_lease(
+            self.project_id,
+            PROJECT_WRITE_LEASE,
+            self.owner_id,
+            ttl_seconds=self.ttl_seconds,
+        )
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"folder2feishu-lease-{self.project_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def checkpoint(self) -> None:
+        with self._failure_lock:
+            failure = self._failure
+        if failure is not None:
+            raise RuntimeError("project writer lease heartbeat failed") from failure
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval_seconds + 1.0))
+        self.store.release_lease(
+            self.project_id,
+            PROJECT_WRITE_LEASE,
+            self.owner_id,
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                self.store.acquire_lease(
+                    self.project_id,
+                    PROJECT_WRITE_LEASE,
+                    self.owner_id,
+                    ttl_seconds=self.ttl_seconds,
+                )
+            except BaseException as exc:
+                with self._failure_lock:
+                    self._failure = exc
+                self._stop.set()
+                return
+
+
+class MigrationExecutor:
+    """Execute the latest confirmed-safe plan one durable action at a time."""
+
+    def __init__(
+        self,
+        store: CoreStore,
+        drive: DriveService,
+        wiki: WikiService,
+        quota: DailyQuotaStore,
+    ) -> None:
+        self.store = store
+        self.drive = drive
+        self.wiki = wiki
+        self.quota = quota
+
+    def execute(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+        control: JobControl | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ExecutionResult:
+        project = self.store.get_project(project_id)
+        _assert_fixed_oauth_identity(project, self.drive)
+        if run_id:
+            durable_run = self.store.get_job_run(run_id)
+            if durable_run.project_id != project_id:
+                raise MigrationBlocked("运行记录与迁移项目不匹配")
+            if durable_run.run_type != RunType.MIGRATION:
+                raise MigrationBlocked("运行记录不是迁移任务")
+            if not durable_run.plan_id:
+                raise MigrationBlocked("运行记录缺少已确认的 plan_id")
+            actions = self.store.list_plan_actions(
+                project_id,
+                plan_id=durable_run.plan_id,
+            )
+        else:
+            actions = self.store.list_plan_actions(project_id)
+            durable_run = None
+        if not actions:
+            raise MigrationBlocked("运行绑定的迁移计划不存在")
+        writable = [
+            action
+            for action in actions
+            if action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}
+        ]
+        if writable and not all(
+            bool((action.details or {}).get("plan_confirmed")) for action in writable
+        ):
+            raise MigrationBlocked("当前差异计划尚未最终确认")
+        blocking = [
+            action
+            for action in actions
+            if action.state in {MigrationState.CONFLICT, MigrationState.MANUAL_ACTION}
+        ]
+        if blocking:
+            raise MigrationBlocked(f"计划包含 {len(blocking)} 个冲突或人工处理项")
+        if not project.target_space_id or not project.target_parent_node_token:
+            raise MigrationBlocked("目标知识库尚未通过预检")
+
+        if durable_run is None:
+            durable_run = self.store.create_job_run(
+                project_id,
+                RunType.MIGRATION,
+                status=RunStatus.RUNNING,
+                scan_id=project.current_scan_id,
+                plan_id=actions[0].plan_id,
+            )
+        run_id = durable_run.id
+        owner_id = f"{run_id}:{uuid.uuid4().hex}"
+        lease = _ProjectLeaseHeartbeat(self.store, project_id, owner_id)
+        lease.start()
+        try:
+            self.store.update_project(project_id, status=ProjectStatus.RUNNING)
+            self.store.update_job_run(
+                run_id,
+                status=RunStatus.RUNNING,
+                total_items=len(actions),
+                started_at=durable_run.started_at or utc_now(),
+                finished_at=None,
+                error="",
+            )
+            self.store.append_audit(
+                project_id,
+                "migration.started",
+                "开始执行已确认的迁移计划",
+                job_run_id=run_id,
+                payload={"plan_id": actions[0].plan_id, "total": len(actions)},
+            )
+        except Exception:
+            lease.close()
+            raise
+
+        controller = control or JobControl()
+        completed = skipped = failed = conflicts = 0
+        quota_paused = False
+        items = {item.id: item for item in self.store.list_inventory(project_id, present=True)}
+
+        try:
+            for index, action in enumerate(actions):
+                controller.checkpoint()
+                lease.checkpoint()
+                action = self.store.get_plan_action(action.id)
+                if action.state == MigrationState.DONE:
+                    completed += 1
+                    if action.action_type == ActionType.SKIP:
+                        skipped += 1
+                    self._progress(progress, action, len(actions), completed, failed, skipped)
+                    continue
+                if action.action_type in {
+                    ActionType.CONFLICT,
+                    ActionType.MANUAL_ACTION,
+                }:
+                    conflicts += 1
+                    continue
+
+                item = items.get(action.inventory_item_id) if action.inventory_item_id else None
+                self._progress(
+                    progress,
+                    action,
+                    len(actions),
+                    completed,
+                    failed,
+                    skipped,
+                    current=True,
+                )
+                try:
+                    self._execute_action(project, action, item, index=index)
+                except DailyQuotaExceeded as exc:
+                    quota_paused = True
+                    self.store.update_plan_action(
+                        action.id,
+                        state=MigrationState.PAUSED,
+                        merge_details={
+                            "quota_reset_at": exc.reset_at.isoformat(),
+                            "quota_used": exc.used,
+                        },
+                    )
+                    self.store.append_audit(
+                        project_id,
+                        "migration.quota_paused",
+                        str(exc),
+                        level=AuditLevel.WARNING,
+                        job_run_id=run_id,
+                        planned_action_id=action.id,
+                        rel_path=action.source_rel_path,
+                        payload={"reset_at": exc.reset_at.isoformat()},
+                    )
+                    break
+                except MigrationBlocked as exc:
+                    conflicts += 1
+                    self.store.update_plan_action(
+                        action.id,
+                        state=MigrationState.CONFLICT,
+                        reason=str(exc),
+                    )
+                    self.store.append_audit(
+                        project_id,
+                        "migration.conflict",
+                        str(exc),
+                        level=AuditLevel.ERROR,
+                        job_run_id=run_id,
+                        planned_action_id=action.id,
+                        rel_path=action.source_rel_path,
+                    )
+                except WikiMoveTaskFailedError as exc:
+                    if exc.retryable:
+                        failed += 1
+                        state = MigrationState.RETRYABLE
+                        event_type = "migration.retryable"
+                    else:
+                        conflicts += 1
+                        state = MigrationState.MANUAL_ACTION
+                        event_type = "migration.manual_action"
+                    self.store.update_plan_action(
+                        action.id,
+                        state=state,
+                        reason=str(exc) if not exc.retryable else action.reason,
+                        merge_details={
+                            "last_error_type": type(exc).__name__,
+                            "last_error": str(exc),
+                        },
+                    )
+                    self.store.append_audit(
+                        project_id,
+                        event_type,
+                        str(exc),
+                        level=AuditLevel.ERROR,
+                        job_run_id=run_id,
+                        planned_action_id=action.id,
+                        rel_path=action.source_rel_path,
+                    )
+                except (FeishuAmbiguousWriteError, FeishuError, OSError) as exc:
+                    failed += 1
+                    self.store.update_plan_action(
+                        action.id,
+                        state=MigrationState.RETRYABLE,
+                        merge_details={
+                            "last_error_type": type(exc).__name__,
+                            "last_error": str(exc),
+                        },
+                    )
+                    self.store.append_audit(
+                        project_id,
+                        "migration.retryable",
+                        str(exc),
+                        level=AuditLevel.ERROR,
+                        job_run_id=run_id,
+                        planned_action_id=action.id,
+                        rel_path=action.source_rel_path,
+                    )
+                else:
+                    completed += 1
+                    if action.action_type in {
+                        ActionType.SKIP,
+                        ActionType.REPORT_MISSING,
+                    }:
+                        skipped += 1
+                lease.checkpoint()
+                self.store.update_job_run(
+                    run_id,
+                    completed_items=completed,
+                    failed_items=failed,
+                    skipped_items=skipped,
+                    summary={"conflicts": conflicts, "current_index": index},
+                )
+                self._progress(progress, action, len(actions), completed, failed, skipped)
+
+            lease.checkpoint()
+            status = (
+                RunStatus.PAUSED
+                if quota_paused
+                else RunStatus.FAILED
+                if failed or conflicts
+                else RunStatus.COMPLETE
+            )
+            project_status = (
+                ProjectStatus.PAUSED
+                if quota_paused
+                else ProjectStatus.BLOCKED
+                if conflicts
+                else ProjectStatus.COMPLETE
+                if not failed
+                else ProjectStatus.PLANNED
+            )
+            result = ExecutionResult(
+                run_id=run_id,
+                total=len(actions),
+                completed=completed,
+                skipped=skipped,
+                failed=failed,
+                conflicts=conflicts,
+                quota_paused=quota_paused,
+            )
+            self.store.update_job_run(
+                run_id,
+                status=status,
+                completed_items=completed,
+                failed_items=failed,
+                skipped_items=skipped,
+                summary={
+                    "conflicts": conflicts,
+                    "quota_paused": quota_paused,
+                },
+                finished_at=utc_now() if status != RunStatus.PAUSED else None,
+            )
+            self.store.update_project(project_id, status=project_status)
+            self.store.append_audit(
+                project_id,
+                "migration.finished",
+                "迁移运行已结束" if not quota_paused else "达到每日预算，已安全暂停",
+                level=(
+                    AuditLevel.WARNING if quota_paused or failed or conflicts else AuditLevel.INFO
+                ),
+                job_run_id=run_id,
+                payload={
+                    "completed": completed,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "conflicts": conflicts,
+                    "quota_paused": quota_paused,
+                },
+            )
+            return result
+        except JobStopped:
+            self.store.update_job_run(
+                run_id,
+                status=RunStatus.CANCELLED,
+                completed_items=completed,
+                failed_items=failed,
+                skipped_items=skipped,
+                finished_at=utc_now(),
+            )
+            self.store.update_project(project_id, status=ProjectStatus.PAUSED)
+            raise
+        except Exception as exc:
+            self.store.update_job_run(
+                run_id,
+                status=RunStatus.FAILED,
+                completed_items=completed,
+                failed_items=failed + 1,
+                skipped_items=skipped,
+                error=f"{type(exc).__name__}: {exc}",
+                finished_at=utc_now(),
+            )
+            self.store.update_project(project_id, status=ProjectStatus.BLOCKED)
+            raise
+        finally:
+            lease.close()
+
+    def _execute_action(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem | None,
+        *,
+        index: int,
+    ) -> None:
+        if action.action_type in {ActionType.SKIP, ActionType.REPORT_MISSING}:
+            self.store.update_plan_action(action.id, state=MigrationState.DONE)
+            return
+        if item is None:
+            raise MigrationBlocked("计划项缺少本地盘点记录")
+        if action.action_type == ActionType.CREATE_FOLDER:
+            self._create_folder(project, action, item)
+            return
+        if action.action_type == ActionType.UPLOAD:
+            file_token, wiki_token = self._upload_file(project, action, item, index=index)
+            destination_parent = self._destination_parent(project, item.rel_path)
+            self.store.upsert_remote_mapping(
+                project_id=project.id,
+                inventory_item_id=item.id,
+                item_kind=ItemKind.FILE,
+                last_source_rel_path=item.rel_path,
+                source_file_identity=item.file_identity,
+                source_sha256=item.sha256,
+                source_size=item.size,
+                wiki_space_id=project.target_space_id,
+                wiki_node_token=wiki_token,
+                object_token=file_token,
+                remote_parent_node_token=destination_parent,
+                remote_title=item.name,
+                remote_status=RemoteStatus.ACTIVE,
+                last_verified_at=utc_now(),
+                is_current=True,
+            )
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.DONE,
+                object_token=file_token,
+            )
+            return
+        if action.action_type in {ActionType.MOVE, ActionType.RENAME}:
+            self._move_or_rename(project, action, item)
+            return
+        if action.action_type == ActionType.VERSION_UPDATE:
+            self._version_update(project, action, item, index=index)
+            return
+        raise MigrationBlocked(f"不支持的计划动作：{action.action_type.value}")
+
+    def _create_folder(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
+        parent_token = self._destination_parent(project, item.rel_path)
+        title = project.wrapper_name if item.rel_path == "" else item.name
+        node = self.wiki.ensure_docx_node(project.target_space_id, title, parent_token)
+        wiki_token = str(node["node_token"])
+        object_token = str(node.get("obj_token") or "")
+        result = self.wiki.reconcile_node(
+            wiki_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=parent_token,
+            expected_title=title,
+            expected_obj_token=object_token or None,
+        )
+        if result.status != ReconcileStatus.MATCH:
+            raise MigrationBlocked("新建目录节点与预期不一致：" + ",".join(result.differences))
+        self.store.upsert_remote_mapping(
+            project_id=project.id,
+            inventory_item_id=item.id,
+            item_kind=ItemKind.FOLDER,
+            last_source_rel_path=item.rel_path,
+            source_file_identity=item.file_identity,
+            source_sha256=None,
+            source_size=None,
+            wiki_space_id=project.target_space_id,
+            wiki_node_token=wiki_token,
+            object_token=object_token,
+            remote_parent_node_token=parent_token,
+            remote_title=title,
+            remote_status=RemoteStatus.ACTIVE,
+            last_verified_at=utc_now(),
+            is_current=True,
+        )
+        self.store.update_plan_action(
+            action.id,
+            state=MigrationState.DONE,
+            merge_details={
+                "wiki_node_token": wiki_token,
+                "object_token": object_token,
+            },
+        )
+
+    def _upload_file(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+        *,
+        index: int,
+        wiki_parent_override: str | None = None,
+    ) -> tuple[str, str]:
+        source = self._verify_source_unchanged(project, item)
+        parent_token = wiki_parent_override or self._destination_parent(project, item.rel_path)
+        hooks = LedgerPersistenceHooks(
+            self.store,
+            project_id=project.id,
+            planned_action_id=action.id,
+            idempotency_key=item.id,
+            upload_attempt=self._reserve_upload_attempt,
+        )
+        current = self.store.get_plan_action(action.id)
+        file_token = current.drive_file_token
+        wiki_token = current.wiki_node_token
+        if wiki_token:
+            result = self.wiki.reconcile_node(
+                wiki_token,
+                expected_space_id=project.target_space_id,
+                expected_parent_token=parent_token,
+                expected_title=item.name,
+                expected_obj_token=file_token or None,
+            )
+            if result.status == ReconcileStatus.MATCH:
+                return file_token, wiki_token
+            if result.status == ReconcileStatus.CONFLICT:
+                raise MigrationBlocked("已迁入节点被人工修改：" + ",".join(result.differences))
+            # A missing node after a persisted token must never cause a blind upload.
+            raise MigrationBlocked("已记录的知识库节点已不存在")
+
+        if not file_token:
+            assert item.size is not None
+            staging = self.drive.ensure_staging(project.id, shard_index=index // 1_000)
+            internal_name = deterministic_staging_name(project.id, item.id, item.name)
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.UPLOADING,
+                merge_details={
+                    "staging_parent_token": staging.shard_token,
+                    "staging_name": internal_name,
+                },
+            )
+            resume = hooks.resume_upload_session()
+            staged = self.drive.stage_file(
+                source,
+                parent_node=staging.shard_token,
+                project_id=project.id,
+                item_key=item.id,
+                original_name=item.name,
+                resume_session=resume,
+                hooks=hooks,
+            )
+            file_token = staged.file_token
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.DRIVE_UPLOADED,
+                merge_details={"staging_name_restored": True},
+            )
+        elif not bool((current.details or {}).get("staging_name_restored")):
+            # on_file_token is a durability boundary that intentionally runs
+            # before Drive restores the deterministic staging title. A crash
+            # in that small window resumes here and idempotently restores the
+            # original title before any move-to-Wiki request is issued.
+            self.drive.rename_file(file_token, item.name, object_type="file")
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.DRIVE_UPLOADED,
+                merge_details={"staging_name_restored": True},
+            )
+
+        current = self.store.get_plan_action(action.id)
+        self.store.update_plan_action(action.id, state=MigrationState.WIKI_MOVING)
+        wiki_token = self.wiki.move_file_to_wiki(
+            project.target_space_id,
+            file_token=file_token,
+            parent_wiki_token=parent_token,
+            hooks=hooks,
+            existing_task_id=current.move_task_id or None,
+        )
+        self.store.update_plan_action(action.id, state=MigrationState.VERIFYING)
+        result = self.wiki.reconcile_node(
+            wiki_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=parent_token,
+            expected_title=item.name,
+            expected_obj_token=file_token,
+        )
+        if result.status != ReconcileStatus.MATCH:
+            raise MigrationBlocked("文件迁入后远端对账不一致：" + ",".join(result.differences))
+        return file_token, wiki_token
+
+    def _reserve_upload_attempt(self) -> None:
+        # Called by FeishuAPIClient immediately before every actual upload HTTP
+        # attempt, including controlled 429/1061045 and multipart retries.
+        self.quota.reserve(1)
+
+    def _move_or_rename(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
+        mapping = self._mapping_for_action(action)
+        destination_parent = self._destination_parent(project, item.rel_path)
+        self.store.update_plan_action(
+            action.id,
+            merge_details={
+                "intended_parent_token": destination_parent,
+                "intended_title": item.name,
+            },
+        )
+        intended = self.wiki.reconcile_node(
+            mapping.wiki_node_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=destination_parent,
+            expected_title=item.name,
+            expected_obj_token=mapping.object_token or None,
+        )
+        already_applied = intended.status == ReconcileStatus.MATCH
+        if not already_applied:
+            self._assert_mapping_unchanged(mapping)
+
+        if not already_applied and mapping.remote_parent_node_token != destination_parent:
+            try:
+                self.wiki.move_node(
+                    project.target_space_id,
+                    mapping.wiki_node_token,
+                    target_parent_token=destination_parent,
+                )
+            except FeishuAmbiguousWriteError:
+                moved = self.wiki.reconcile_node(
+                    mapping.wiki_node_token,
+                    expected_space_id=project.target_space_id,
+                    expected_parent_token=destination_parent,
+                    expected_title=mapping.remote_title,
+                    expected_obj_token=mapping.object_token or None,
+                )
+                if moved.status != ReconcileStatus.MATCH:
+                    raise
+
+        if not already_applied and mapping.remote_title != item.name:
+            try:
+                if item.kind == ItemKind.FILE:
+                    if not mapping.object_token:
+                        raise MigrationBlocked("原格式文件映射缺少 Drive 对象 token")
+                    self.drive.rename_file(mapping.object_token, item.name, object_type="file")
+                else:
+                    self.wiki.rename_node(
+                        project.target_space_id,
+                        mapping.wiki_node_token,
+                        item.name,
+                    )
+            except FeishuAmbiguousWriteError:
+                renamed = self.wiki.reconcile_node(
+                    mapping.wiki_node_token,
+                    expected_space_id=project.target_space_id,
+                    expected_parent_token=destination_parent,
+                    expected_title=item.name,
+                    expected_obj_token=mapping.object_token or None,
+                )
+                if renamed.status != ReconcileStatus.MATCH:
+                    raise
+
+        result = self.wiki.reconcile_node(
+            mapping.wiki_node_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=destination_parent,
+            expected_title=item.name,
+            expected_obj_token=mapping.object_token or None,
+        )
+        if result.status != ReconcileStatus.MATCH:
+            raise MigrationBlocked("移动或改名后的远端对账失败：" + ",".join(result.differences))
+        self.store.upsert_remote_mapping(
+            id=mapping.id,
+            project_id=project.id,
+            inventory_item_id=item.id,
+            item_kind=item.kind,
+            last_source_rel_path=item.rel_path,
+            source_file_identity=item.file_identity,
+            source_sha256=item.sha256,
+            source_size=item.size,
+            wiki_space_id=project.target_space_id,
+            wiki_node_token=mapping.wiki_node_token,
+            object_token=mapping.object_token,
+            remote_parent_node_token=destination_parent,
+            remote_title=item.name,
+            remote_status=RemoteStatus.ACTIVE,
+            conflict_reason="",
+            last_verified_at=utc_now(),
+            is_current=True,
+        )
+        self.store.update_plan_action(action.id, state=MigrationState.DONE)
+
+    def _version_update(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+        *,
+        index: int,
+    ) -> None:
+        old = self._mapping_for_action(action)
+        wrapper = self.store.find_current_remote_mapping(project.id, rel_path="")
+        if wrapper is None:
+            raise MigrationBlocked("找不到项目根目录知识库节点")
+        destination_parent = self._destination_parent(project, item.rel_path)
+
+        # A new version first enters a dedicated Wiki holding node.  Only after
+        # it is verified do we archive the old node and move the new node into place.
+        holding = self.wiki.ensure_docx_node(
+            project.target_space_id,
+            "_Folder2Feishu_换版暂存",
+            wrapper.wiki_node_token,
+        )
+        holding_token = str(holding["node_token"])
+        current = self.store.get_plan_action(action.id)
+        details = current.details or {}
+        new_already_at_destination = False
+        if current.wiki_node_token and current.drive_file_token:
+            at_destination = self.wiki.reconcile_node(
+                current.wiki_node_token,
+                expected_space_id=project.target_space_id,
+                expected_parent_token=destination_parent,
+                expected_title=item.name,
+                expected_obj_token=current.drive_file_token,
+            )
+            new_already_at_destination = at_destination.status == ReconcileStatus.MATCH
+        if new_already_at_destination:
+            file_token = current.drive_file_token
+            new_wiki_token = current.wiki_node_token
+        else:
+            file_token, new_wiki_token = self._upload_file(
+                project,
+                action,
+                item,
+                index=index,
+                wiki_parent_override=holding_token,
+            )
+
+        if not details.get("old_archived"):
+            history_parent = str(details.get("history_parent_token") or "")
+            if not history_parent:
+                history_parent = self._ensure_history_parent(project, item, wrapper)
+                self.store.update_plan_action(
+                    action.id,
+                    merge_details={"history_parent_token": history_parent},
+                )
+            archived = self.wiki.reconcile_node(
+                old.wiki_node_token,
+                expected_space_id=project.target_space_id,
+                expected_parent_token=history_parent,
+                expected_title=old.remote_title,
+                expected_obj_token=old.object_token or None,
+            )
+            if archived.status != ReconcileStatus.MATCH:
+                self._assert_mapping_unchanged(old)
+                try:
+                    self.wiki.archive_file_node(
+                        project.target_space_id,
+                        old.wiki_node_token,
+                        history_parent_token=history_parent,
+                    )
+                except FeishuAmbiguousWriteError:
+                    archived = self.wiki.reconcile_node(
+                        old.wiki_node_token,
+                        expected_space_id=project.target_space_id,
+                        expected_parent_token=history_parent,
+                        expected_title=old.remote_title,
+                        expected_obj_token=old.object_token or None,
+                    )
+                    if archived.status != ReconcileStatus.MATCH:
+                        raise
+            self.store.update_plan_action(
+                action.id,
+                merge_details={
+                    "old_archived": True,
+                    "history_parent_token": history_parent,
+                },
+            )
+
+        if not new_already_at_destination:
+            try:
+                self.wiki.move_node(
+                    project.target_space_id,
+                    new_wiki_token,
+                    target_parent_token=destination_parent,
+                )
+            except FeishuAmbiguousWriteError:
+                moved = self.wiki.reconcile_node(
+                    new_wiki_token,
+                    expected_space_id=project.target_space_id,
+                    expected_parent_token=destination_parent,
+                    expected_title=item.name,
+                    expected_obj_token=file_token,
+                )
+                if moved.status != ReconcileStatus.MATCH:
+                    # Keep both versions in Wiki. The old version is recoverable
+                    # from history and the new one remains in the holding node.
+                    raise
+        result = self.wiki.reconcile_node(
+            new_wiki_token,
+            expected_space_id=project.target_space_id,
+            expected_parent_token=destination_parent,
+            expected_title=item.name,
+            expected_obj_token=file_token,
+        )
+        if result.status != ReconcileStatus.MATCH:
+            raise MigrationBlocked("新版本进入目标位置后对账失败：" + ",".join(result.differences))
+
+        self.store.mark_remote_mapping_historical(old.id)
+        self.store.upsert_remote_mapping(
+            project_id=project.id,
+            inventory_item_id=item.id,
+            item_kind=ItemKind.FILE,
+            last_source_rel_path=item.rel_path,
+            source_file_identity=item.file_identity,
+            source_sha256=item.sha256,
+            source_size=item.size,
+            wiki_space_id=project.target_space_id,
+            wiki_node_token=new_wiki_token,
+            object_token=file_token,
+            remote_parent_node_token=destination_parent,
+            remote_title=item.name,
+            remote_status=RemoteStatus.ACTIVE,
+            last_verified_at=utc_now(),
+            is_current=True,
+        )
+        self.store.update_plan_action(action.id, state=MigrationState.DONE)
+
+    def _ensure_history_parent(
+        self, project: Project, item: InventoryItem, wrapper: RemoteMapping
+    ) -> str:
+        parent = str(
+            self.wiki.ensure_docx_node(
+                project.target_space_id,
+                "_Folder2Feishu_历史版本",
+                wrapper.wiki_node_token,
+            )["node_token"]
+        )
+        source_parent = _parent_rel_path(item.rel_path) or ""
+        for part in PurePosixPath(source_parent).parts:
+            parent = str(
+                self.wiki.ensure_docx_node(project.target_space_id, part, parent)["node_token"]
+            )
+        timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
+        return str(
+            self.wiki.ensure_docx_node(project.target_space_id, timestamp, parent)["node_token"]
+        )
+
+    def _verify_source_unchanged(self, project: Project, item: InventoryItem) -> Path:
+        source = _safe_source_path(project, item)
+        try:
+            stat_result = source.stat()
+        except OSError as exc:
+            raise MigrationBlocked(f"源文件已不可读：{item.rel_path}") from exc
+        if not source.is_file() or stat_result.st_size != item.size:
+            raise MigrationBlocked(f"源文件在计划后发生变化：{item.rel_path}")
+        digest = sha256_file(source)
+        if digest != item.sha256:
+            raise MigrationBlocked(f"源文件在计划后发生变化：{item.rel_path}")
+        return source
+
+    def _destination_parent(self, project: Project, rel_path: str) -> str:
+        parent_rel = _parent_rel_path(rel_path)
+        if parent_rel is None:
+            return project.target_parent_node_token
+        mapping = self.store.find_current_remote_mapping(project.id, rel_path=parent_rel)
+        if mapping is None or mapping.item_kind != ItemKind.FOLDER:
+            raise MigrationBlocked(f"目标父目录尚未建立：{parent_rel or project.wrapper_name}")
+        if mapping.remote_status != RemoteStatus.ACTIVE:
+            raise MigrationBlocked("目标父目录远端状态异常")
+        return mapping.wiki_node_token
+
+    def _mapping_for_action(self, action: PlannedAction) -> RemoteMapping:
+        if not action.remote_mapping_id:
+            raise MigrationBlocked("计划动作缺少远端映射")
+        return self.store.get_remote_mapping(action.remote_mapping_id)
+
+    def _assert_mapping_unchanged(self, mapping: RemoteMapping) -> None:
+        result = self.wiki.reconcile_node(
+            mapping.wiki_node_token,
+            expected_space_id=mapping.wiki_space_id,
+            expected_parent_token=mapping.remote_parent_node_token,
+            expected_title=mapping.remote_title,
+            expected_obj_token=mapping.object_token or None,
+        )
+        if result.status == ReconcileStatus.MISSING:
+            self.store.upsert_remote_mapping(
+                id=mapping.id,
+                remote_status=RemoteStatus.MISSING,
+                conflict_reason="飞书节点已被人工删除",
+            )
+            raise MigrationBlocked("飞书节点已被人工删除")
+        if result.status == ReconcileStatus.CONFLICT:
+            self.store.upsert_remote_mapping(
+                id=mapping.id,
+                remote_status=RemoteStatus.CONFLICT,
+                conflict_reason="飞书节点已被人工移动或改名",
+            )
+            raise MigrationBlocked("飞书节点已被人工修改：" + ",".join(result.differences))
+        self.store.upsert_remote_mapping(
+            id=mapping.id,
+            remote_status=RemoteStatus.ACTIVE,
+            conflict_reason="",
+            last_verified_at=utc_now(),
+        )
+
+    @staticmethod
+    def _progress(
+        callback: ProgressCallback | None,
+        action: PlannedAction,
+        total: int,
+        completed: int,
+        failed: int,
+        skipped: int,
+        *,
+        current: bool = False,
+    ) -> None:
+        if callback:
+            callback(
+                total=total,
+                completed=completed,
+                failed=failed,
+                skipped=skipped,
+                current_item=action.source_rel_path if current else "",
+            )
+
+
+class RemoteReconciler:
+    """Read back every current Wiki mapping and mark manual drift as conflict."""
+
+    def __init__(
+        self,
+        store: CoreStore,
+        drive: DriveService,
+        wiki: WikiService,
+    ) -> None:
+        self.store = store
+        self.drive = drive
+        self.wiki = wiki
+
+    def reconcile(self, project_id: str) -> ReconcileSummary:
+        project = self.store.get_project(project_id)
+        _assert_fixed_oauth_identity(project, self.drive)
+        owner_id = f"reconcile:{uuid.uuid4().hex}"
+        lease = _ProjectLeaseHeartbeat(self.store, project_id, owner_id)
+        lease.start()
+        run = None
+        try:
+            mappings = self.store.list_remote_mappings(project_id, current_only=True)
+            matched = missing = conflicts = 0
+            run = self.store.create_job_run(
+                project_id, RunType.RECONCILIATION, status=RunStatus.RUNNING
+            )
+            for mapping in mappings:
+                lease.checkpoint()
+                result = self.wiki.reconcile_node(
+                    mapping.wiki_node_token,
+                    expected_space_id=mapping.wiki_space_id,
+                    expected_parent_token=mapping.remote_parent_node_token,
+                    expected_title=mapping.remote_title,
+                    expected_obj_token=mapping.object_token or None,
+                )
+                if result.status == ReconcileStatus.MATCH:
+                    matched += 1
+                    status = RemoteStatus.ACTIVE
+                    reason = ""
+                elif result.status == ReconcileStatus.MISSING:
+                    missing += 1
+                    status = RemoteStatus.MISSING
+                    reason = "飞书节点不存在"
+                else:
+                    conflicts += 1
+                    status = RemoteStatus.CONFLICT
+                    reason = "远端差异：" + ",".join(result.differences)
+                self.store.upsert_remote_mapping(
+                    id=mapping.id,
+                    remote_status=status,
+                    conflict_reason=reason,
+                    last_verified_at=utc_now(),
+                )
+            lease.checkpoint()
+            summary = ReconcileSummary(
+                checked=len(mappings),
+                matched=matched,
+                missing=missing,
+                conflicts=conflicts,
+            )
+            self.store.update_job_run(
+                run.id,
+                status=RunStatus.COMPLETE,
+                total_items=len(mappings),
+                completed_items=len(mappings),
+                summary={
+                    "matched": matched,
+                    "missing": missing,
+                    "conflicts": conflicts,
+                },
+                finished_at=utc_now(),
+            )
+            self.store.append_audit(
+                project_id,
+                "reconcile.finished",
+                "远端映射回读完成",
+                level=AuditLevel.WARNING if missing or conflicts else AuditLevel.INFO,
+                job_run_id=run.id,
+                payload={
+                    "checked": len(mappings),
+                    "matched": matched,
+                    "missing": missing,
+                    "conflicts": conflicts,
+                },
+            )
+            return summary
+        except Exception as exc:
+            if run is not None:
+                self.store.update_job_run(
+                    run.id,
+                    status=RunStatus.FAILED,
+                    error=f"{type(exc).__name__}: {exc}",
+                    finished_at=utc_now(),
+                )
+            raise
+        finally:
+            lease.close()

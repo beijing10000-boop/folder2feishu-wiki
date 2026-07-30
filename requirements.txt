@@ -1,6 +1,7 @@
-fastapi==0.116.1
-httpx==0.28.1
-python-dotenv==1.1.1
-python-multipart==0.0.20
-uvicorn[standard]==0.35.0
+fastapi>=0.141.1,<0.142
+httpx>=0.28.1,<0.29
+pydantic>=2.13.4,<3
+python-multipart>=0.0.20,<0.1
+SQLAlchemy>=2.0.42,<3
+uvicorn[standard]>=0.52,<0.53
 

@@ -4,24 +4,51 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "folder2feishu-wiki"
-version = "0.1.0"
-description = "Preserve a local folder hierarchy while migrating files to Feishu Wiki."
+version = "1.0.0rc1"
+description = "A recoverable Windows local-folder mirror for Feishu Wiki."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [{name = "folder2feishu-wiki contributors"}]
 dependencies = [
-  "fastapi==0.116.1",
-  "httpx==0.28.1",
-  "python-dotenv==1.1.1",
-  "python-multipart==0.0.20",
-  "uvicorn[standard]==0.35.0",
+  "fastapi>=0.141.1,<0.142",
+  "httpx>=0.28.1,<0.29",
+  "pydantic>=2.13.4,<3",
+  "python-multipart>=0.0.20,<0.1",
+  "SQLAlchemy>=2.0.42,<3",
+  "uvicorn[standard]>=0.52,<0.53",
+]
+
+[project.scripts]
+folder2feishu = "folder2feishu.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pyinstaller>=6.15,<7",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<0.13",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["folder2feishu*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
 

@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from folder2feishu.application import ApplicationServices
+from folder2feishu.core import RemoteStatus
+from folder2feishu.feishu import FeishuError
+from folder2feishu.runtime import RuntimePaths
+from folder2feishu.security import MemoryCredentialStore
+
+
+def _quota(
+    *,
+    used: str = "100",
+    total: str = "1000",
+    unlimited: bool = False,
+    tenant_exceeded: bool = False,
+    list_name: str = "biz_infos",
+) -> dict:
+    return {
+        list_name: [
+            {
+                "name": "ccm",
+                "used": used,
+                "quota": total,
+                "unlimited": unlimited,
+            }
+        ],
+        "is_tenant_quota_exceeded": tenant_exceeded,
+    }
+
+
+def test_quota_capacity_compares_inventory_bytes_with_available_ccm_bytes() -> None:
+    ok, message = ApplicationServices._quota_capacity_check(
+        _quota(),
+        required_bytes=901,
+    )
+
+    assert ok is False
+    assert "可用 900 字节" in message
+    assert "本地待迁移 901 字节" in message
+
+    ok, message = ApplicationServices._quota_capacity_check(
+        _quota(),
+        required_bytes=900,
+    )
+
+    assert ok is True
+    assert "容量充足" in message
+
+
+def test_quota_capacity_accepts_unlimited_and_compatibility_list_name() -> None:
+    ok, message = ApplicationServices._quota_capacity_check(
+        _quota(unlimited=True, list_name="biz_lists"),
+        required_bytes=10_000_000,
+    )
+
+    assert ok is True
+    assert "不限额" in message
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"is_tenant_quota_exceeded": False}, "业务容量列表"),
+        (
+            {"biz_infos": [], "is_tenant_quota_exceeded": False},
+            "云文档容量（ccm）",
+        ),
+        (
+            {
+                "biz_infos": [
+                    {
+                        "name": "ccm",
+                        "used": "not-a-number",
+                        "quota": "1000",
+                        "unlimited": False,
+                    }
+                ],
+                "is_tenant_quota_exceeded": False,
+            },
+            "used",
+        ),
+        (
+            {
+                "biz_infos": [
+                    {
+                        "name": "ccm",
+                        "used": "100",
+                        "quota": "invalid",
+                        "unlimited": False,
+                    }
+                ],
+                "is_tenant_quota_exceeded": False,
+            },
+            "quota",
+        ),
+        (
+            {
+                "biz_infos": [
+                    {
+                        "name": "ccm",
+                        "used": "100",
+                        "quota": "1000",
+                        "unlimited": "false",
+                    }
+                ],
+                "is_tenant_quota_exceeded": False,
+            },
+            "unlimited",
+        ),
+        (
+            {
+                "biz_infos": [
+                    {
+                        "name": "ccm",
+                        "used": "100",
+                        "quota": "1000",
+                        "unlimited": False,
+                    }
+                ]
+            },
+            "租户超额状态",
+        ),
+    ],
+)
+def test_quota_capacity_fails_closed_on_missing_or_malformed_fields(
+    payload: dict,
+    expected: str,
+) -> None:
+    with pytest.raises(FeishuError, match=expected):
+        ApplicationServices._quota_capacity_check(payload, required_bytes=1)
+
+
+def test_quota_capacity_blocks_when_tenant_is_already_over_quota() -> None:
+    ok, message = ApplicationServices._quota_capacity_check(
+        _quota(tenant_exceeded=True),
+        required_bytes=1,
+    )
+
+    assert ok is False
+    assert "租户容量已超限" in message
+
+
+def test_quota_capacity_blocks_when_ccm_usage_exceeds_its_quota() -> None:
+    ok, message = ApplicationServices._quota_capacity_check(
+        _quota(used="1001", total="1000"),
+        required_bytes=0,
+    )
+
+    assert ok is False
+    assert "云文档容量已超限" in message
+
+
+def test_preflight_is_blocked_when_inventory_exceeds_ccm_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.bin").write_bytes(b"x" * 901)
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.create_project(
+        name="capacity-check",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+    services.scanner.scan(project.id)
+
+    class FakeDrive:
+        @staticmethod
+        def get_current_user_info() -> dict:
+            return {"user_id": "current-user"}
+
+        @staticmethod
+        def can_edit_wiki(_: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_root_folder_token() -> str:
+            return "drive-root"
+
+        @staticmethod
+        def get_quota_detail(_: str) -> dict:
+            return _quota()
+
+    class FakeWiki:
+        @staticmethod
+        def get_node(_: str) -> dict:
+            return {
+                "space_id": "space",
+                "node_token": "parent",
+                "parent_node_token": "",
+            }
+
+        @staticmethod
+        def list_children(_: str, __: str) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(
+        services,
+        "auth_status",
+        lambda: {
+            "authorized": True,
+            "message": "授权可用",
+        },
+    )
+    monkeypatch.setattr(
+        services,
+        "feishu_services",
+        lambda: (FakeDrive(), FakeWiki()),
+    )
+    try:
+        report = services.preflight(project.id)
+    finally:
+        services.close()
+
+    quota_check = next(check for check in report.checks if check["code"] == "drive_quota")
+    assert report.ready is False
+    assert quota_check["blocking"] is True
+    assert quota_check["status"] == "error"
+    assert "容量不足" in quota_check["message"]
+
+
+def test_preflight_uses_zero_pending_bytes_for_unchanged_second_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.bin").write_bytes(b"x" * 901)
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.create_project(
+        name="incremental-capacity-check",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+    services.scanner.scan(project.id)
+    item = next(
+        item
+        for item in services.store.list_inventory(project.id, present=True)
+        if item.kind.value == "FILE"
+    )
+    services.store.upsert_remote_mapping(
+        project_id=project.id,
+        inventory_item_id=item.id,
+        item_kind=item.kind,
+        last_source_rel_path=item.rel_path,
+        source_file_identity=item.file_identity,
+        source_sha256=item.sha256,
+        source_size=item.size,
+        wiki_space_id="space",
+        wiki_node_token="wiki-file",
+        object_token="file-token",
+        remote_parent_node_token="parent",
+        remote_title=item.name,
+        remote_status=RemoteStatus.ACTIVE,
+    )
+    services.scanner.scan(project.id)
+
+    class FakeDrive:
+        @staticmethod
+        def get_current_user_info() -> dict:
+            return {"user_id": "current-user"}
+
+        @staticmethod
+        def can_edit_wiki(_: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_root_folder_token() -> str:
+            return "drive-root"
+
+        @staticmethod
+        def get_quota_detail(_: str) -> dict:
+            # No spare capacity remains, but the unchanged incremental run
+            # requires no new upload and must not be falsely blocked.
+            return _quota(used="1000", total="1000")
+
+    class FakeWiki:
+        @staticmethod
+        def get_node(_: str) -> dict:
+            return {
+                "space_id": "space",
+                "node_token": "parent",
+                "parent_node_token": "",
+            }
+
+        @staticmethod
+        def list_children(_: str, __: str) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(
+        services,
+        "auth_status",
+        lambda: {
+            "authorized": True,
+            "message": "授权可用",
+        },
+    )
+    monkeypatch.setattr(
+        services,
+        "feishu_services",
+        lambda: (FakeDrive(), FakeWiki()),
+    )
+    try:
+        report = services.preflight(project.id)
+    finally:
+        services.close()
+
+    quota_check = next(check for check in report.checks if check["code"] == "drive_quota")
+    assert report.ready is True
+    assert quota_check["blocking"] is False
+    assert quota_check["status"] == "ok"
+    assert "本地待迁移 0 字节" in quota_check["message"]
+
+
+def test_wiki_child_capacity_accounts_for_new_existing_and_ambiguous_wrapper() -> None:
+    other = [{"title": f"node-{index}", "obj_type": "docx"} for index in range(1_999)]
+
+    ok, message = ApplicationServices._wiki_child_capacity(
+        other,
+        wrapper_name="Pilot",
+    )
+    assert ok is True
+    assert "2000 / 2000" in message
+
+    ok, message = ApplicationServices._wiki_child_capacity(
+        [*other, {"title": "another", "obj_type": "docx"}],
+        wrapper_name="Pilot",
+    )
+    assert ok is False
+    assert "超过 2000" in message
+
+    ok, message = ApplicationServices._wiki_child_capacity(
+        [*other, {"title": "Pilot", "obj_type": "docx"}],
+        wrapper_name="Pilot",
+    )
+    assert ok is True
+    assert "同名 Docx 包装节点已存在" in message
+
+    ok, message = ApplicationServices._wiki_child_capacity(
+        [
+            {"title": "Pilot", "obj_type": "docx"},
+            {"title": "Pilot", "obj_type": "docx"},
+        ],
+        wrapper_name="Pilot",
+    )
+    assert ok is False
+    assert "人工消歧" in message
