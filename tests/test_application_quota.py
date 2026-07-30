@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from folder2feishu.application import ApplicationServices
+from folder2feishu.application import ApplicationServices, QuotaCapacityUnknown
 from folder2feishu.core import RemoteStatus
 from folder2feishu.feishu import FeishuError
 from folder2feishu.runtime import RuntimePaths
@@ -89,6 +89,28 @@ def test_quota_capacity_accepts_compatible_false_values(unlimited: object) -> No
     assert "容量充足" in message
 
 
+def test_quota_capacity_uses_numeric_quota_when_unlimited_is_unknown() -> None:
+    payload = _quota()
+    payload["biz_infos"][0]["unlimited"] = None
+
+    ok, message = ApplicationServices._quota_capacity_check(
+        payload,
+        required_bytes=900,
+    )
+
+    assert ok is True
+    assert "容量充足" in message
+
+
+def test_quota_capacity_is_noncomparable_without_unlimited_or_quota() -> None:
+    payload = _quota()
+    payload["biz_infos"][0]["unlimited"] = None
+    payload["biz_infos"][0]["quota"] = None
+
+    with pytest.raises(QuotaCapacityUnknown, match="不阻断迁移"):
+        ApplicationServices._quota_capacity_check(payload, required_bytes=1)
+
+
 @pytest.mark.parametrize(
     "payload, expected",
     [
@@ -124,20 +146,6 @@ def test_quota_capacity_accepts_compatible_false_values(unlimited: object) -> No
                 "is_tenant_quota_exceeded": False,
             },
             "quota",
-        ),
-        (
-            {
-                "biz_infos": [
-                    {
-                        "name": "ccm",
-                        "used": "100",
-                        "quota": "1000",
-                        "unlimited": "not-a-boolean",
-                    }
-                ],
-                "is_tenant_quota_exceeded": False,
-            },
-            "unlimited",
         ),
         (
             {
@@ -253,6 +261,82 @@ def test_preflight_is_blocked_when_inventory_exceeds_ccm_capacity(
     assert quota_check["blocking"] is True
     assert quota_check["status"] == "error"
     assert "容量不足" in quota_check["message"]
+
+
+def test_preflight_warns_but_remains_ready_when_quota_limit_is_not_returned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.bin").write_bytes(b"x")
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.create_project(
+        name="unknown-capacity-check",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+    services.scanner.scan(project.id)
+
+    class FakeDrive:
+        @staticmethod
+        def get_current_user_info() -> dict:
+            return {"user_id": "current-user"}
+
+        @staticmethod
+        def can_edit_wiki(_: str) -> bool:
+            return True
+
+        @staticmethod
+        def get_root_folder_token() -> str:
+            return "drive-root"
+
+        @staticmethod
+        def get_quota_detail(_: str) -> dict:
+            payload = _quota()
+            payload["biz_infos"][0]["quota"] = None
+            payload["biz_infos"][0]["unlimited"] = None
+            return payload
+
+    class FakeWiki:
+        @staticmethod
+        def get_node(_: str) -> dict:
+            return {
+                "space_id": "space",
+                "node_token": "parent",
+                "parent_node_token": "",
+            }
+
+        @staticmethod
+        def list_children(_: str, __: str) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(
+        services,
+        "auth_status",
+        lambda: {
+            "authorized": True,
+            "message": "授权可用",
+        },
+    )
+    monkeypatch.setattr(
+        services,
+        "feishu_services",
+        lambda: (FakeDrive(), FakeWiki()),
+    )
+    try:
+        report = services.preflight(project.id)
+    finally:
+        services.close()
+
+    quota_check = next(check for check in report.checks if check["code"] == "drive_quota")
+    assert report.ready is True
+    assert quota_check["blocking"] is False
+    assert quota_check["status"] == "warning"
+    assert "不阻断迁移" in quota_check["message"]
 
 
 def test_preflight_uses_zero_pending_bytes_for_unchanged_second_scan(

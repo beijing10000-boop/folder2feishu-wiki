@@ -60,6 +60,10 @@ class PreflightReport:
     checks: list[dict[str, Any]]
 
 
+class QuotaCapacityUnknown(FeishuError):
+    """The tenant is not over quota, but no comparable CCM limit was returned."""
+
+
 class ApplicationServices:
     """Own process-wide stores without ever returning secrets to the browser."""
 
@@ -394,17 +398,26 @@ class ApplicationServices:
                         quota,
                         required_bytes=pending_upload_bytes,
                     )
+                except QuotaCapacityUnknown as exc:
+                    add(
+                        "drive_quota",
+                        "云盘容量检查",
+                        str(exc),
+                        ok=True,
+                        blocking=False,
+                        warning=True,
+                    )
                 except FeishuError as exc:
                     add(
                         "drive_quota",
-                        "云盘容量充足",
+                        "云盘容量检查",
                         str(exc),
                         ok=False,
                     )
                 else:
                     add(
                         "drive_quota",
-                        "云盘容量充足",
+                        "云盘容量检查",
                         quota_message,
                         ok=quota_ok,
                     )
@@ -633,10 +646,14 @@ class ApplicationServices:
         if ccm is None:
             raise FeishuError("飞书容量响应缺少云文档容量（ccm）")
 
-        unlimited = ApplicationServices._quota_bool(
-            ccm.get("unlimited"),
-            field="unlimited",
-        )
+        raw_unlimited = ccm.get("unlimited")
+        try:
+            unlimited = ApplicationServices._quota_bool(
+                raw_unlimited,
+                field="unlimited",
+            )
+        except FeishuError:
+            unlimited = None
         used = ApplicationServices._quota_bytes(ccm.get("used"), field="used")
         if unlimited:
             return (
@@ -644,7 +661,16 @@ class ApplicationServices:
                 f"云文档容量不限额；当前已用 {used} 字节，本地待迁移 {required_bytes} 字节",
             )
 
-        total = ApplicationServices._quota_bytes(ccm.get("quota"), field="quota")
+        raw_total = ccm.get("quota")
+        try:
+            total = ApplicationServices._quota_bytes(raw_total, field="quota")
+        except FeishuError as exc:
+            if unlimited is False:
+                raise
+            raise QuotaCapacityUnknown(
+                "飞书确认租户当前未超限，但未返回可比较的云文档个人容量；"
+                "此项不阻断迁移，实际上传仍受飞书服务端容量限制"
+            ) from exc
         if used > total:
             return (
                 False,
@@ -687,9 +713,9 @@ class ApplicationServices:
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().casefold()
-            if normalized in {"true", "1"}:
+            if normalized in {"true", "1", "yes", "unlimited"}:
                 return True
-            if normalized in {"false", "0"}:
+            if normalized in {"false", "0", "no"}:
                 return False
         raise FeishuError(f"飞书云文档容量的 {field} 字段无效")
 
