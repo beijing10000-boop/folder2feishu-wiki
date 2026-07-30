@@ -31,6 +31,7 @@ from .audit_export import export_audit_csv, export_audit_json
 from .core import (
     AuditLevel,
     MigrationState,
+    PlanBlockedError,
     ProjectStatus,
     RunType,
 )
@@ -304,6 +305,11 @@ def create_app(
     async def handle_feishu(_: Request, exc: Exception) -> JSONResponse:
         return _error(502, "FEISHU_REQUEST_FAILED", str(exc))
 
+    @app.exception_handler(PlanBlockedError)
+    async def handle_plan_blocked(_: Request, exc: PlanBlockedError) -> JSONResponse:
+        LOGGER.info("request is waiting for a complete scan: %s", exc)
+        return _error(409, "SCAN_REQUIRED", "请先等待本地目录盘点完整结束")
+
     @app.exception_handler(Exception)
     async def handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
         LOGGER.exception("unexpected request failure", exc_info=exc)
@@ -426,7 +432,16 @@ def create_app(
             )
             return asdict(result)
 
-        job = services.jobs.start(project_id, "scan", worker)
+        try:
+            job = services.jobs.start(project_id, "scan", worker)
+        except RuntimeError as exc:
+            if "已有任务正在运行" not in str(exc):
+                raise
+            raise ApiFailure(
+                409,
+                "JOB_ALREADY_RUNNING",
+                "当前项目的盘点任务仍在运行，请勿重复启动",
+            ) from exc
         return {"run_id": job.run_id, "status": job.status}
 
     @app.get("/api/v2/projects/{project_id}/scan")

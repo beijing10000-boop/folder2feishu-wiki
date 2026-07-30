@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AppSettings, AuthStatus, Project } from "./types";
+import type { AppSettings, AuthStatus, Project, ScanResult } from "./types";
 
 const apiMock = vi.hoisted(() => ({
   isDemo: false,
@@ -175,5 +175,67 @@ describe("配置优先迁移向导", () => {
     screen
       .getAllByRole("button", { name: "开始只读盘点" })
       .forEach((button) => expect(button).toBeEnabled());
+  });
+
+  it("正在盘点时持续等待并禁止重复启动，不提前执行预检", async () => {
+    const settings: AppSettings = {
+      ...emptySettings,
+      app_id: "cli_configured",
+      app_secret_configured: true
+    };
+    const auth: AuthStatus = {
+      configured: true,
+      authorized: true,
+      user_name: "迁移管理员",
+      scopes
+    };
+    const project: Project = {
+      id: "project-scanning",
+      name: "FabDazzle 全量盘点",
+      source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
+      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      create_wrapper: true,
+      wrapper_name: "Team FabDazzle - 文档",
+      mode: "safe_incremental"
+    };
+    const activeScan: ScanResult = {
+      scan_id: "scan-active",
+      status: "RUNNING",
+      summary: {
+        files: 403,
+        folders: 97,
+        bytes: 3_400_000_000,
+        placeholders: 0,
+        unreadable: 0,
+        empty_files: 0,
+        too_long_names: 0,
+        max_depth: 7,
+        max_siblings: 154,
+        upload_calls: 1_089,
+        estimated_days: 1,
+        scan_complete: false
+      },
+      checks: [],
+      tree: []
+    };
+    apiMock.getSettings.mockResolvedValue(settings);
+    apiMock.getAuthStatus.mockResolvedValue(auth);
+    apiMock.listProjects.mockResolvedValue([project]);
+    apiMock.getScan.mockResolvedValue(activeScan);
+    apiMock.saveSettings.mockResolvedValue(settings);
+    apiMock.updateProject.mockResolvedValue(project);
+
+    render(<App />);
+
+    const rail = await screen.findByLabelText("迁移步骤");
+    const scanStep = within(rail).getByText("盘点").closest("button");
+    fireEvent.click(screen.getAllByRole("button", { name: "一键验证全部" })[0]);
+    await waitFor(() => expect(scanStep).toBeEnabled());
+    if (scanStep) fireEvent.click(scanStep);
+
+    const activeButtons = await screen.findAllByRole("button", { name: "盘点进行中" });
+    activeButtons.forEach((button) => expect(button).toBeDisabled());
+    expect(apiMock.getPreflight).not.toHaveBeenCalled();
+    expect(apiMock.startScan).not.toHaveBeenCalled();
   });
 });

@@ -464,24 +464,27 @@ function App() {
 
   const loadProjectData = useCallback(
     async (activeProject: Project) => {
+      const scanCall = await Promise.allSettled([api.getScan(activeProject.id)]);
+      const scanResult = scanCall[0].status === "fulfilled" ? scanCall[0].value : undefined;
+      if (scanResult) setScan(scanResult);
       const calls = await Promise.allSettled([
-        api.getScan(activeProject.id),
-        api.getPreflight(activeProject.id),
+        scanResult?.summary.scan_complete
+          ? api.getPreflight(activeProject.id)
+          : Promise.resolve(undefined),
         api.getTree(activeProject.id),
         api.getPlan(activeProject.id),
         api.getAudit(activeProject.id),
         activeProject.last_run_id ? api.getRun(activeProject.last_run_id) : Promise.resolve(undefined)
       ]);
-      if (calls[0].status === "fulfilled") setScan(calls[0].value);
-      if (calls[1].status === "fulfilled") setPreflight(calls[1].value);
-      if (calls[2].status === "fulfilled") setTree(calls[2].value);
-      if (calls[3].status === "fulfilled") setPlan(calls[3].value);
-      if (calls[4].status === "fulfilled") {
-        const audit = calls[4].value as { events?: AuditEvent[]; items?: RunItem[] };
+      if (calls[0].status === "fulfilled" && calls[0].value) setPreflight(calls[0].value);
+      if (calls[1].status === "fulfilled") setTree(calls[1].value);
+      if (calls[2].status === "fulfilled") setPlan(calls[2].value);
+      if (calls[3].status === "fulfilled") {
+        const audit = calls[3].value as { events?: AuditEvent[]; items?: RunItem[] };
         setEvents(audit.events ?? []);
         setRunItems(audit.items ?? []);
       }
-      if (calls[5].status === "fulfilled" && calls[5].value) setRun(calls[5].value);
+      if (calls[4].status === "fulfilled" && calls[4].value) setRun(calls[4].value);
     },
     []
   );
@@ -580,6 +583,49 @@ function App() {
     }, 4_000);
     return () => window.clearInterval(timer);
   }, [run?.id, run?.state]);
+
+  useEffect(() => {
+    if (
+      !project ||
+      (scan?.status !== "RUNNING" && scan?.status !== "PENDING")
+    ) return;
+    let alive = true;
+    let polling = false;
+    const refreshScan = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const result = await api.getScan(project.id);
+        if (!alive) return;
+        if (result.status === "COMPLETED" && result.summary.scan_complete) {
+          const [guard, remoteTree] = await Promise.all([
+            api.getPreflight(project.id),
+            api.getTree(project.id)
+          ]);
+          if (!alive) return;
+          setPreflight(guard);
+          setTree(remoteTree.length ? remoteTree : result.tree);
+          setScan(result);
+          notify("盘点完成。请检查目录规模与问题清单，再进入预检。");
+        } else {
+          setScan(result);
+          if (result.status === "FAILED") {
+            notify("盘点未完成，请查看本地完整性检查和日志后重试。", "error");
+          }
+        }
+      } catch {
+        // A short local API interruption must not turn an active scan into a failure.
+      } finally {
+        polling = false;
+      }
+    };
+    void refreshScan();
+    const timer = window.setInterval(refreshScan, 1_500);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [project?.id, scan?.status, notify]);
 
   const markValidation = (
     key: ValidationKey,
@@ -847,32 +893,22 @@ function App() {
       setStep("config");
       return;
     }
+    if (scan?.status === "RUNNING" || scan?.status === "PENDING") {
+      notify("当前盘点仍在运行，请等待完成。", "info");
+      setStep("scan");
+      return;
+    }
     setBusy("scan");
     try {
       const saved = (await persistProject()) ?? project;
       if (!saved) return;
       await api.startScan(saved.id);
-      notify("已开始只读扫描，本地文件不会被修改。", "info");
-      let result: ScanResult | undefined;
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 250 : 1000));
-        result = await api.getScan(saved.id);
-        setScan(result);
-        if (result.status !== "RUNNING" && result.status !== "PENDING") break;
-      }
-      const [guard, remoteTree] = await Promise.all([
-        api.getPreflight(saved.id),
-        api.getTree(saved.id)
-      ]);
-      setPreflight(guard);
-      setTree(remoteTree.length ? remoteTree : result?.tree ?? []);
+      const result = await api.getScan(saved.id);
+      setScan(result);
+      setPreflight(undefined);
+      setPlan(undefined);
       setStep("scan");
-      notify(
-        result?.summary.scan_complete
-          ? "盘点完成。请检查目录规模与问题清单，再进入预检。"
-          : "盘点尚未完整结束，后续步骤保持锁定。",
-        result?.summary.scan_complete ? "ok" : "warning"
-      );
+      notify("已开始只读盘点。页面会持续刷新进度，本地文件不会被修改。", "info");
     } catch (error) {
       showError(error);
     } finally {
@@ -882,6 +918,11 @@ function App() {
 
   const refreshPreflight = async () => {
     if (!project) return;
+    if (!scan?.summary.scan_complete) {
+      notify("请先等待本地目录盘点完整结束。", "warning");
+      setStep("scan");
+      return;
+    }
     setBusy("preflight");
     try {
       const result = await api.getPreflight(project.id);
@@ -1001,6 +1042,8 @@ function App() {
     (Object.values(validation) as ValidationState[ValidationKey][]).every(
       (item) => item.status === "passed"
     );
+  const scanActive =
+    busy === "scan" || scan?.status === "RUNNING" || scan?.status === "PENDING";
 
   const stepStatus = (id: StepId): "done" | "active" | "pending" | "blocked" => {
     if (id === step) return "active";
@@ -1656,7 +1699,7 @@ function App() {
               </div>
               <div className="inventory-command__actions">
                 <div className={`scan-state is-${(scan?.status ?? "IDLE").toLowerCase()}`}>
-                  {busy === "scan" || scan?.status === "RUNNING" || scan?.status === "PENDING" ? (
+                  {scanActive ? (
                     <LoaderCircle className="spin" size={18} />
                   ) : scan?.summary.scan_complete ? (
                     <CheckCircle2 size={18} />
@@ -1666,7 +1709,7 @@ function App() {
                   <span>
                     <small>INVENTORY STATE</small>
                     <strong>
-                      {busy === "scan"
+                      {scanActive
                         ? "扫描进行中"
                         : scan?.summary.scan_complete
                           ? "盘点完整"
@@ -1678,11 +1721,11 @@ function App() {
                 </div>
                 <Button
                   icon={scan ? RefreshCcw : ScanLine}
-                  busy={busy === "scan"}
+                  busy={scanActive}
                   onClick={startScan}
-                  disabled={!configReady}
+                  disabled={!configReady || scanActive}
                 >
-                  {scan ? "重新只读盘点" : "开始只读盘点"}
+                  {scanActive ? "盘点进行中" : scan ? "重新只读盘点" : "开始只读盘点"}
                 </Button>
                 <Button
                   variant="primary"
@@ -1795,11 +1838,11 @@ function App() {
                     <Button
                       variant="primary"
                       icon={ScanLine}
-                      busy={busy === "scan"}
+                      busy={scanActive}
                       onClick={startScan}
-                      disabled={!configReady}
+                      disabled={!configReady || scanActive}
                     >
-                      开始只读盘点
+                      {scanActive ? "盘点进行中" : "开始只读盘点"}
                     </Button>
                   }
                 />
