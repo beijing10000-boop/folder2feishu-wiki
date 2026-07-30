@@ -7,7 +7,9 @@ import time
 from folder2feishu.core import (
     CoreStore,
     InventoryScanner,
+    InventoryState,
     IssueCode,
+    IssueSeverity,
     ItemKind,
     file_attribute_flags,
 )
@@ -48,9 +50,12 @@ def test_scanner_preserves_root_empty_directories_names_and_hashes(tmp_path):
         assert file_item.name == "原名 (最终).txt"
         assert file_item.sha256 == hashlib.sha256(payload).hexdigest()
         assert file_item.file_identity
+        assert by_path["零字节.dat"].state == InventoryState.DISCOVERED
 
         issues = store.list_issues(project.id, scan_id=result.scan_id)
         assert [issue.code for issue in issues] == [IssueCode.ZERO_BYTE_FILE]
+        assert issues[0].severity == IssueSeverity.WARNING
+        assert issues[0].details["representation"] == "empty_wiki_docx"
         assert store.get_project(project.id).scan_complete
     finally:
         store.close()

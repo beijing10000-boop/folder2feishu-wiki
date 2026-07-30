@@ -527,7 +527,11 @@ class ApplicationServices:
                 ActionType.VERSION_UPDATE,
             }:
                 upload_calls += (
-                    1 if size <= 20 * 1024 * 1024 else 2 + math.ceil(size / (4 * 1024 * 1024))
+                    0
+                    if size == 0
+                    else 1
+                    if size <= 20 * 1024 * 1024
+                    else 2 + math.ceil(size / (4 * 1024 * 1024))
                 )
             rows.append(
                 {

@@ -279,6 +279,74 @@ def test_first_run_second_run_move_and_version_update(tmp_path: Path) -> None:
     )
 
 
+def test_zero_byte_file_becomes_idempotent_same_name_wiki_placeholder(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "zero-byte-source"
+    source.mkdir()
+    empty = source / "保留原名.empty"
+    empty.write_bytes(b"")
+    store = CoreStore(tmp_path / "zero-byte-ledger.sqlite3")
+    try:
+        project = store.create_project(
+            name="zero-byte",
+            source_root=source,
+            target_wiki_url="https://example.feishu.cn/wiki/target-parent",
+            target_space_id="space-1",
+            target_parent_node_token="target-parent",
+            identity_key="fixed-user",
+        )
+        InventoryScanner(store).scan(project.id)
+        plan = MigrationPlanner(store).build(project.id)
+        assert plan.counts[ActionType.UPLOAD.value] == 1
+        assert plan.estimated_upload_calls == 0
+        _confirm(store, project.id)
+
+        drive = FakeDrive()
+        wiki = FakeWiki(drive)
+        executor = MigrationExecutor(
+            store,
+            drive,  # type: ignore[arg-type]
+            wiki,  # type: ignore[arg-type]
+            DailyQuotaStore(tmp_path / "zero-byte-quota.json"),
+        )
+        first = executor.execute(project.id)
+        assert first.failed == first.conflicts == 0
+        assert drive.uploads == 0
+        placeholder = next(
+            mapping
+            for mapping in store.list_remote_mappings(project.id)
+            if mapping.last_source_rel_path == "保留原名.empty"
+        )
+        assert placeholder.source_size == 0
+        assert placeholder.object_token.startswith("docx-")
+        assert wiki.nodes[placeholder.wiki_node_token]["title"] == "保留原名.empty"
+
+        InventoryScanner(store).scan(project.id)
+        unchanged = MigrationPlanner(store).build(project.id)
+        assert unchanged.counts[ActionType.SKIP.value] == unchanged.total_actions
+        _confirm(store, project.id)
+        executor.execute(project.id)
+        assert drive.uploads == 0
+
+        renamed = source / "改名后.empty"
+        empty.rename(renamed)
+        InventoryScanner(store).scan(project.id)
+        rename_plan = MigrationPlanner(store).build(project.id)
+        assert rename_plan.counts[ActionType.RENAME.value] == 1
+        _confirm(store, project.id)
+        executor.execute(project.id)
+        assert drive.renames == []
+        current = next(
+            mapping
+            for mapping in store.list_remote_mappings(project.id)
+            if mapping.last_source_rel_path == "改名后.empty"
+        )
+        assert wiki.nodes[current.wiki_node_token]["title"] == "改名后.empty"
+    finally:
+        store.close()
+
+
 def test_resume_from_persisted_drive_token_does_not_reupload(
     tmp_path: Path,
 ) -> None:

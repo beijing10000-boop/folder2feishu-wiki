@@ -431,8 +431,7 @@ class InventoryScanner:
         def record_file(candidate: _FileCandidate, digest: str | None) -> None:
             size = int(candidate.stat_result.st_size)
             manual = (
-                size == 0
-                or candidate.is_offline
+                candidate.is_offline
                 or candidate.is_recall_on_open
                 or candidate.is_recall_on_data_access
                 or digest is None
@@ -829,7 +828,11 @@ class InventoryScanner:
         if is_file and size == 0:
             add_issue(
                 IssueCode.ZERO_BYTE_FILE,
-                IssueSeverity.BLOCKING,
-                "zero-byte files require an explicit manual decision",
+                IssueSeverity.WARNING,
+                (
+                    "Feishu Drive rejects empty uploads; this file will be represented "
+                    "by an empty Wiki document node with the original name"
+                ),
                 rel_path,
+                details={"representation": "empty_wiki_docx", "source_size": 0},
             )
