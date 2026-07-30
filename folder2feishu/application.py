@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import math
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -41,7 +39,6 @@ from .feishu import (
 from .job_control import BackgroundJobManager
 from .quota import DailyQuotaStore
 from .runtime import RuntimePaths, assert_runtime_outside_source
-from .scheduler import ScheduleSpec, install_daily_schedule
 from .security import CredentialStore, create_credential_store
 from .settings import PublicSettings, SettingsStore
 from .verification import (
@@ -63,67 +60,6 @@ class PreflightReport:
     checks: list[dict[str, Any]]
 
 
-class ScheduleStore:
-    """Small non-secret schedule registry; Task Scheduler remains authoritative."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.RLock()
-
-    def get(self, project_id: str) -> ScheduleSpec:
-        with self._lock:
-            values = self._read()
-            row = values.get(project_id) or {}
-            return ScheduleSpec(
-                project_id=project_id,
-                enabled=bool(row.get("enabled", False)),
-                local_time=str(row.get("local_time") or "02:00"),
-            )
-
-    def save(self, spec: ScheduleSpec) -> ScheduleSpec:
-        spec.validate()
-        install_daily_schedule(spec)
-        with self._lock:
-            values = self._read()
-            values[spec.project_id] = {
-                "enabled": spec.enabled,
-                "local_time": spec.local_time,
-            }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(values, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            temporary.replace(self.path)
-        return spec
-
-    def list_all(self) -> list[ScheduleSpec]:
-        with self._lock:
-            result: list[ScheduleSpec] = []
-            for project_id, row in self._read().items():
-                spec = ScheduleSpec(
-                    project_id=project_id,
-                    enabled=bool(row.get("enabled", False)),
-                    local_time=str(row.get("local_time") or "02:00"),
-                )
-                try:
-                    spec.validate()
-                except ValueError:
-                    continue
-                result.append(spec)
-            return result
-
-    def _read(self) -> dict[str, dict[str, Any]]:
-        if not self.path.exists():
-            return {}
-        try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return value if isinstance(value, dict) else {}
-
-
 class ApplicationServices:
     """Own process-wide stores without ever returning secrets to the browser."""
 
@@ -141,7 +77,6 @@ class ApplicationServices:
         self.scanner = InventoryScanner(self.store)
         self.planner = MigrationPlanner(self.store)
         self.jobs = BackgroundJobManager(max_workers=2)
-        self.schedules = ScheduleStore(self.paths.base / "schedules.json")
         self._lock = threading.RLock()
         self._client: FeishuAPIClient | None = None
         self._token_provider: StoredUserTokenProvider | None = None

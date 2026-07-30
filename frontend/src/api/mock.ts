@@ -8,7 +8,6 @@ import type {
   RunItem,
   RunSummary,
   ScanResult,
-  SchedulePayload,
   TreeNode
 } from "../types";
 
@@ -26,8 +25,6 @@ const project: Project = {
   wrapper_name: "Team FabDazzle - 文档",
   create_wrapper: true,
   mode: "safe_incremental",
-  schedule_enabled: false,
-  schedule_time: "02:30",
   last_run_id: "run_20260730_1024",
   created_at: now(),
   updated_at: now()
@@ -267,7 +264,6 @@ const plan: MigrationPlan = {
 
 let runStartedAt = Date.now() - 4_200_000;
 let runState: RunSummary["state"] = "RUNNING";
-let schedule: SchedulePayload = { enabled: false, local_time: "02:30" };
 
 const runItems: RunItem[] = [
   {
@@ -377,7 +373,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "1.0.0-rc.1-demo",
+      version: "1.0.0-rc.2-demo",
       database: "ok"
     } as T;
   }
@@ -475,13 +471,6 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
   if (path.includes("/api/v2/runs/") && method === "POST") return getRun() as T;
   if (path === `${projectPath}/reconcile` && method === "POST") {
     return { matched: 18_706, conflicts: 1, missing: 0, checked_at: now() } as T;
-  }
-  if (path === `${projectPath}/schedule` && method === "GET") return schedule as T;
-  if (path === `${projectPath}/schedule` && method === "PUT") {
-    schedule = body;
-    project.schedule_enabled = schedule.enabled;
-    project.schedule_time = schedule.local_time;
-    return schedule as T;
   }
   if (path.startsWith(`${projectPath}/audit`)) {
     if (path.includes("format=csv")) {

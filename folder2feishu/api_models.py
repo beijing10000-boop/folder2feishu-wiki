@@ -114,7 +114,6 @@ class ProjectUpdate(WriteApiModel):
     target_wiki_url: str | None = None
     create_wrapper: bool | None = None
     wrapper_name: str | None = Field(default=None, max_length=250)
-    schedule_enabled: bool | None = None
 
 
 class ProjectRead(ApiModel):
@@ -126,7 +125,6 @@ class ProjectRead(ApiModel):
     target_parent_token: str = ""
     wrapper_name: str = ""
     mode: ProjectMode = ProjectMode.SAFE_INCREMENTAL
-    schedule_enabled: bool = False
     last_run_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -243,17 +241,6 @@ class RunRead(ApiModel):
     errors: list[ScanIssueRead] = Field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-class ScheduleRead(ApiModel):
-    project_id: str
-    enabled: bool = False
-    local_time: str = "02:00"
-
-
-class ScheduleUpdate(WriteApiModel):
-    enabled: bool
-    local_time: str = "02:00"
 
 
 class ReconcileResponse(ApiModel):

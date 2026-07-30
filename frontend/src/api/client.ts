@@ -7,7 +7,6 @@ import type {
   RunItem,
   RunSummary,
   ScanResult,
-  SchedulePayload,
   TreeNode,
   VerificationResult
 } from "../types";
@@ -333,12 +332,5 @@ export const api = {
       `${API_ROOT}/projects/${projectId}/audit`
     ),
   exportAudit: (projectId: string, format: "csv" | "json") =>
-    blobRequest(`${API_ROOT}/projects/${projectId}/audit?format=${format}`),
-  getSchedule: (projectId: string) =>
-    request<SchedulePayload>(`${API_ROOT}/projects/${projectId}/schedule`),
-  saveSchedule: (projectId: string, value: SchedulePayload) =>
-    request<SchedulePayload>(`${API_ROOT}/projects/${projectId}/schedule`, {
-      method: "PUT",
-      ...body(value)
-    })
+    blobRequest(`${API_ROOT}/projects/${projectId}/audit?format=${format}`)
 };

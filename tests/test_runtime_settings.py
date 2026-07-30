@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from folder2feishu.runtime import RuntimePaths, assert_runtime_outside_source
-from folder2feishu.scheduler import ScheduleSpec, application_command, serialize_schedule
 from folder2feishu.settings import DEFAULT_SCOPES, PublicSettings, SettingsStore
 
 
@@ -43,13 +42,3 @@ def test_settings_reject_external_bind_and_missing_scope() -> None:
         PublicSettings(host="0.0.0.0").validate()
     with pytest.raises(ValueError, match="缺少"):
         PublicSettings(scopes=["wiki:wiki"]).validate()
-
-
-def test_schedule_validation_and_command() -> None:
-    spec = ScheduleSpec(project_id="project-01", enabled=True, local_time="02:30")
-    assert json.loads(serialize_schedule(spec))["local_time"] == "02:30"
-    assert "--run-project" in application_command("project-01")
-    with pytest.raises(ValueError):
-        ScheduleSpec(project_id="../bad", enabled=True).validate()
-    with pytest.raises(ValueError):
-        ScheduleSpec(project_id="good", enabled=True, local_time="25:90").validate()

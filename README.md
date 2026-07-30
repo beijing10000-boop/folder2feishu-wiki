@@ -25,17 +25,27 @@ D:\Team FabDazzle - 文档
 
 不使用 Claude，不做 AI 分类，不重组目录，也不把 Office/PDF 转换成飞书在线文档。
 
-## 下载与启动
+## 下载、安装与更新
 
 从 [Releases](https://github.com/beijing10000-boop/folder2feishu-wiki/releases) 下载：
 
-- `Folder2Feishu-Windows-x64-Setup-*.exe`：推荐，一键安装。
-- `Folder2Feishu-Windows-x64-Portable-*.zip`：解压后运行 `Folder2Feishu.exe`。
-- `SHA256SUMS.txt`：核对安装包和便携包完整性。
+- `Folder2Feishu-Python-*.zip`：Python 源码发布包。
+- `SHA256SUMS.txt`：核对发布包完整性。
 
-目标电脑不需要安装 Python、Git 或 GitHub CLI。程序默认打开 `http://127.0.0.1:8000`，且只监听本机。
+本项目不再提供或使用 PyInstaller EXE、Inno Setup 安装器。目标电脑只需安装
+**Python 3.12（64 位）**，不需要 Git、GitHub CLI、Node.js 或 Go。
 
-当前 RC 构建未配置商业代码签名证书，Windows SmartScreen 可能显示未知发布者；请只从本仓库 Release 下载并先核对 SHA-256。
+首次安装：
+
+1. 解压 `Folder2Feishu-Python-*.zip`。
+2. 双击 `Install.cmd`；脚本会建立独立 Python 虚拟环境并创建桌面快捷方式。
+3. 以后双击桌面的 `Folder2Feishu Wiki`，浏览器会打开 `http://127.0.0.1:8000`。
+
+程序仅监听本机。应用源码默认安装到：
+
+```text
+%LOCALAPPDATA%\Programs\Folder2FeishuWiki
+```
 
 运行数据位于：
 
@@ -50,6 +60,23 @@ D:\Team FabDazzle - 文档
 ```
 
 这些文件禁止放进 OneDrive 同步目录。
+
+以后更新不需要重装 EXE：
+
+- 私有 GitHub 仓库在线更新：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki\Update-Folder2Feishu.ps1" -GitHubToken "<只需仓库读取权限的Token>" -IncludePrerelease
+  ```
+
+- 离线更新：从 Release 下载新 ZIP 后运行：
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki\Update-Folder2Feishu.ps1" -PackagePath "D:\下载\Folder2Feishu-Python-新版本.zip"
+  ```
+
+更新脚本会停止旧服务、替换应用源码、更新 Python 依赖并重新启动。SQLite 台账、
+DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 
 ## 飞书应用配置
 
@@ -79,11 +106,11 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 ## 桌面端操作流程
 
 程序打开后默认进入“配置”首页。飞书应用、OAuth、上传限流、本地来源、知识库目标、
-安全增量和计划任务共七组配置都在这一页完成。App、OAuth、本地根目录和 Wiki 目标旁
+安全增量共六组配置都在这一页完成。App、OAuth、本地根目录和 Wiki 目标旁
 均有独立验证按钮；“一键验证全部”会按顺序调用相同的真实后端验证。保存成功不等于
 验证通过，全部必要项重新验证通过后才会开放盘点。
 
-1. **配置**：填写七组设置，保存 App Secret，完成用户 OAuth，并逐项验证。
+1. **配置**：填写六组设置，保存 App Secret，完成用户 OAuth，并逐项验证。
 2. **盘点**：只读扫描本地目录，确认文件、空目录、OneDrive 占位和人工处理项。
 3. **预检**：检查授权身份、容量、文件可读性、名称、大小、深度和单层节点数。
 4. **差异计划**：查看目录树、增量动作、预计上传调用量和预计迁移天数，确认后才允许写入。
@@ -115,15 +142,17 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 
 第二次执行在来源与远端都未变化时应为零重复上传。
 
-## 无界面运行与计划任务
+## 手动无界面运行
 
 手动无界面运行一个已配置项目：
 
 ```powershell
-Folder2Feishu.exe --run-project <项目ID>
+cd "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki"
+.\.venv\Scripts\python.exe -m folder2feishu --run-project <项目ID>
 ```
 
-定时任务默认关闭。启用后，界面会为该项目创建 Windows 每日计划任务；计划任务仍会先扫描、预检和生成安全增量计划，不会绕过阻断项。
+产品不创建 Windows 计划任务，也不提供自动定时迁移。所有盘点和迁移都由用户
+在界面中明确启动，或显式执行上述命令。
 
 ## 明确边界
 
@@ -134,7 +163,7 @@ Folder2Feishu.exe --run-project <项目ID>
 - Word、Excel、PowerPoint、PDF 等保留原格式，不转换成飞书原生文档。
 - 35,000 多文件受飞书租户配额和每日调用预算影响，通常需要跨多个自然日续跑。
 
-## 开发、测试和打包
+## 开发、测试和发布
 
 ```powershell
 py -3.12 -m venv .venv
@@ -150,7 +179,7 @@ npm test
 npm run build
 cd ..
 
-.\packaging\build-windows.ps1 -SkipInstaller
+.\packaging\build-python-release.ps1
 ```
 
 完整性能测试默认跳过，可显式运行：
@@ -160,7 +189,8 @@ $env:FOLDER2FEISHU_RUN_SCALE_TEST = "1"
 .\.venv\Scripts\python.exe -m pytest tests\test_core_v2_scale.py
 ```
 
-发布工作流会在 Windows 上运行后端检查、前端构建、独立 EXE 启动健康检查，并使用 Inno Setup 生成安装包。
+发布工作流会在 Windows 上运行后端检查、前端构建、Python 源码包安装测试和网页
+健康检查。发布产物不包含应用 EXE，也不使用 PyInstaller 或 Inno Setup。
 
 ## Clean-room 说明
 

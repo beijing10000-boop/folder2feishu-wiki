@@ -74,8 +74,6 @@ export interface Project {
   wrapper_name?: string;
   create_wrapper?: boolean;
   mode: "safe_incremental";
-  schedule_enabled: boolean;
-  schedule_time?: string;
   last_run_id?: string;
   created_at?: string;
   updated_at?: string;
@@ -220,9 +218,4 @@ export interface DashboardState {
   run?: RunSummary;
   run_items: RunItem[];
   events: AuditEvent[];
-}
-
-export interface SchedulePayload {
-  enabled: boolean;
-  local_time: string;
 }

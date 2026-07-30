@@ -1,4 +1,4 @@
-"""Windows entry point for interactive and scheduled migration runs."""
+"""Local entry point for the interactive UI and explicit headless runs."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from .core import JobRun, MigrationState, RunStatus, RunType
 from .executor import ExecutionResult
 from .logging_config import configure_logging
 from .runtime import RuntimePaths
-from .scheduler import remove_schedule
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,11 +66,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-dir",
         type=Path,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--remove-all-schedules",
-        action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -155,7 +149,7 @@ def run_project(services: ApplicationServices, project_id: str) -> int:
         )
         return _execution_exit_code(services.executor().execute(project_id, run_id=resumable.id))
 
-    LOGGER.info("开始计划任务扫描：%s", project.name)
+    LOGGER.info("开始无界面迁移扫描：%s", project.name)
     scan = services.scanner.scan(project_id)
     if not scan.complete:
         LOGGER.error("扫描不完整，已停止：blocking=%s", scan.blocking_issues)
@@ -179,17 +173,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = RuntimePaths.discover(args.runtime_dir).ensure()
     configure_logging(paths)
     services = ApplicationServices(paths=paths)
-    if args.remove_all_schedules:
-        try:
-            for spec in services.schedules.list_all():
-                remove_schedule(spec.project_id)
-            LOGGER.info("已清理 Folder2Feishu Windows 计划任务")
-            return 0
-        except Exception:
-            LOGGER.exception("清理 Windows 计划任务失败")
-            return 1
-        finally:
-            services.close()
     if args.run_project:
         try:
             return run_project(services, args.run_project)
@@ -223,8 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             host="127.0.0.1",
             port=settings.port,
             log_level="info",
-            # A windowed PyInstaller executable has no stderr stream. Uvicorn's
-            # default formatter probes stderr.isatty() and would abort startup.
+            # Keep console and background PowerShell launches on one stable
+            # logging path; application logs are written under LOCALAPPDATA.
             log_config=None,
             access_log=False,
         )
