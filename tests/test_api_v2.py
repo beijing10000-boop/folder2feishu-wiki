@@ -53,6 +53,17 @@ def test_local_api_contract_and_wrapper_fields(tmp_path: Path) -> None:
             assert project["wrapper_name"] == "Folder2Feishu_Pilot_20260730"
             assert project["last_run_id"] is None
 
+            before_scan = client.get(
+                f"/api/v2/projects/{project['id']}/preflight",
+            )
+            assert before_scan.status_code == 200, before_scan.text
+            assert before_scan.json()["complete"] is False
+            assert before_scan.json()["writable"] is False
+            assert any(
+                check["code"] == "scan_complete" and check["blocking"]
+                for check in before_scan.json()["checks"]
+            )
+
             updated = client.patch(
                 f"/api/v2/projects/{project['id']}",
                 headers=headers,
@@ -72,6 +83,42 @@ def test_local_api_contract_and_wrapper_fields(tmp_path: Path) -> None:
             )
             assert invalid.status_code == 422
             assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
+    finally:
+        services.close()
+
+
+def test_duplicate_scan_is_an_expected_conflict(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.store.create_project(
+        name="active-scan",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+
+    def reject_duplicate(*args, **kwargs):
+        raise RuntimeError("该项目已有任务正在运行")
+
+    monkeypatch.setattr(services.jobs, "start", reject_duplicate)
+    app = create_app(services, static_root=Path("frontend/dist").resolve())
+    try:
+        with TestClient(app) as client:
+            csrf = client.get("/api/v2/session").json()["csrf_token"]
+            response = client.post(
+                f"/api/v2/projects/{project.id}/scan",
+                headers={"X-F2F-CSRF": csrf},
+                json={},
+            )
+            assert response.status_code == 409, response.text
+            assert response.json()["error"]["code"] == "JOB_ALREADY_RUNNING"
+            assert "仍在运行" in response.json()["error"]["message"]
     finally:
         services.close()
 

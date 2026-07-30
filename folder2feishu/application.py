@@ -294,6 +294,13 @@ class ApplicationServices:
             ("未发现阻断项" if not blocking_issues else f"发现 {len(blocking_issues)} 个阻断项"),
             ok=not blocking_issues,
         )
+        if not project.scan_complete:
+            return PreflightReport(
+                ready=False,
+                writable=False,
+                checked_at=datetime.now(UTC).isoformat(),
+                checks=checks,
+            )
 
         auth = self.auth_status()
         add(

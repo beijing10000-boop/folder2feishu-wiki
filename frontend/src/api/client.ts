@@ -117,7 +117,11 @@ const normalizeScan = (raw: Record<string, any>): ScanResult => {
   const counts = raw.summary ?? raw.counts ?? {};
   const rawStatus = String(raw.status ?? raw.state ?? "").toUpperCase();
   const status = (
-    rawStatus === "COMPLETE" || rawStatus === "DONE" ? "COMPLETED" : rawStatus
+    rawStatus === "COMPLETE" || rawStatus === "DONE"
+      ? "COMPLETED"
+      : rawStatus === "QUEUED"
+        ? "PENDING"
+        : rawStatus
   ) as ScanResult["status"];
   return {
     scan_id: raw.scan_id ?? raw.run_id ?? "",
