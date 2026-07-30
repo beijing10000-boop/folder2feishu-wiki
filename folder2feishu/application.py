@@ -633,9 +633,10 @@ class ApplicationServices:
         if ccm is None:
             raise FeishuError("飞书容量响应缺少云文档容量（ccm）")
 
-        unlimited = ccm.get("unlimited")
-        if not isinstance(unlimited, bool):
-            raise FeishuError("飞书云文档容量的 unlimited 字段无效")
+        unlimited = ApplicationServices._quota_bool(
+            ccm.get("unlimited"),
+            field="unlimited",
+        )
         used = ApplicationServices._quota_bytes(ccm.get("used"), field="used")
         if unlimited:
             return (
@@ -675,6 +676,22 @@ class ApplicationServices:
         if parsed < 0:
             raise FeishuError(f"飞书云文档容量的 {field} 字段无效")
         return parsed
+
+    @staticmethod
+    def _quota_bool(value: Any, *, field: str) -> bool:
+        """Normalize boolean values emitted by different Drive v2 gateways."""
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"true", "1"}:
+                return True
+            if normalized in {"false", "0"}:
+                return False
+        raise FeishuError(f"飞书云文档容量的 {field} 字段无效")
 
     @staticmethod
     def _wiki_node_depth(wiki: WikiService, node: dict[str, Any]) -> int:
