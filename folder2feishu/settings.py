@@ -26,13 +26,16 @@ class PublicSettings:
     port: int = 8000
     upload_qps: float = 4.0
     wiki_calls_per_minute: int = 90
-    daily_upload_budget: int = 9_500
+    daily_upload_budget: int = 0
     open_browser: bool = True
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> PublicSettings:
         allowed = cls.__dataclass_fields__.keys()
         payload = {key: item for key, item in value.items() if key in allowed}
+        # Older releases persisted a conservative 9,500-call application budget.
+        # The migration worker now runs without an application-level daily cap.
+        payload["daily_upload_budget"] = 0
         result = cls(**payload)
         result.validate()
         return result
@@ -52,8 +55,8 @@ class PublicSettings:
             raise ValueError("上传速率必须大于 0 且不超过 4 QPS")
         if not 1 <= int(self.wiki_calls_per_minute) <= 90:
             raise ValueError("知识库调用频率必须在 1 到 90 次/分钟之间")
-        if not 1 <= int(self.daily_upload_budget) <= 9_500:
-            raise ValueError("每日上传预算必须在 1 到 9500 之间")
+        if int(self.daily_upload_budget) != 0:
+            raise ValueError("应用侧调用限制必须为 0（不设累计总次数上限）")
 
 
 class SettingsStore:

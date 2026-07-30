@@ -25,7 +25,6 @@ from .models import InventoryItem, RemoteMapping, utc_now
 
 DIRECT_UPLOAD_LIMIT = 20 * 1024 * 1024
 CHUNK_SIZE = 4 * 1024 * 1024
-DAILY_UPLOAD_BUDGET = 9_500
 
 
 class PlanBlockedError(RuntimeError):
@@ -281,7 +280,10 @@ class MigrationPlanner:
             )
         )
         blocked = bool(counts[ActionType.CONFLICT.value] or counts[ActionType.MANUAL_ACTION.value])
-        minimum_days = math.ceil(estimated_calls / DAILY_UPLOAD_BUDGET) if estimated_calls else 0
+        # The application does not impose a daily upload-call ceiling.  Keep
+        # this compatibility field at zero instead of presenting an artificial
+        # multi-day estimate; Feishu rate-limit backoff still applies at run time.
+        minimum_days = 0
         summary = {
             "counts": dict(counts),
             "estimated_upload_calls": estimated_calls,

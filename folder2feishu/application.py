@@ -461,9 +461,7 @@ class ApplicationServices:
             "upload_calls": calls,
             "hashes_computed": int(scan_run_summary.get("hashes_computed", 0)),
             "hashes_reused": int(scan_run_summary.get("hashes_reused", 0)),
-            "estimated_days": math.ceil(calls / self.settings_store.load().daily_upload_budget)
-            if calls
-            else 0,
+            "estimated_days": 0,
             "scan_complete": project.scan_complete,
         }
 
@@ -569,11 +567,7 @@ class ApplicationServices:
                 for action in actions
             ),
             "estimated_upload_calls": upload_calls,
-            "estimated_days": math.ceil(
-                upload_calls / self.settings_store.load().daily_upload_budget
-            )
-            if upload_calls
-            else 0,
+            "estimated_days": 0,
             "confirmed": confirmed,
             "blocking_conflicts": sum(row["blocking"] for row in rows),
         }

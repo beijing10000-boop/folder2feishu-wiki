@@ -42,7 +42,7 @@ class SettingsRead(ApiModel):
     port: int = 8000
     upload_qps: float = 4.0
     wiki_calls_per_minute: int = 90
-    daily_upload_budget: int = 9_500
+    daily_upload_budget: int = 0
 
 
 class SettingsUpdate(WriteApiModel):
@@ -52,7 +52,9 @@ class SettingsUpdate(WriteApiModel):
     scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_SCOPES))
     upload_qps: float = Field(default=4.0, gt=0, le=4.0)
     wiki_calls_per_minute: int = Field(default=90, ge=1, le=90)
-    daily_upload_budget: int = Field(default=9_500, ge=1, le=9_500)
+    # Kept in the wire format for rolling upgrades; the service stores 0
+    # and applies no application-side daily call cap.
+    daily_upload_budget: int = Field(default=0, ge=0, le=0)
 
 
 class AuthStatus(ApiModel):
@@ -222,7 +224,7 @@ class RunStatus(StrEnum):
 
 class QuotaStatus(ApiModel):
     used: int = 0
-    budget: int = 9_500
+    budget: int = 0
     reset_at: datetime | None = None
 
 

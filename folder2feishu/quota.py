@@ -56,7 +56,7 @@ def _interprocess_path_lock(path: Path) -> Iterator[None]:
 
 class DailyQuotaExceeded(RuntimeError):
     def __init__(self, used: int, budget: int, reset_at: datetime) -> None:
-        super().__init__(f"今日上传调用预算已用完：{used}/{budget}")
+        super().__init__(f"应用侧上传调用限制已达到：{used}/{budget}")
         self.used = used
         self.budget = budget
         self.reset_at = reset_at
@@ -71,17 +71,20 @@ class QuotaSnapshot:
 
 
 class DailyQuotaStore:
-    """Conservative local budget below Feishu's published 10,000/day cap."""
+    """Durable upload-call counter with an optional application-side budget.
+
+    ``budget=0`` records usage without imposing a daily call limit.
+    """
 
     def __init__(
         self,
         path: str | Path,
         *,
-        budget: int = 9_500,
+        budget: int = 0,
         now: Callable[[], datetime] = datetime.now,
     ) -> None:
-        if not 1 <= budget <= 9_500:
-            raise ValueError("每日调用预算必须在 1 到 9500 之间")
+        if budget < 0:
+            raise ValueError("应用侧调用限制不能为负数")
         self.path = Path(path)
         self.budget = budget
         self._now = now
@@ -96,7 +99,7 @@ class DailyQuotaStore:
             raise ValueError("调用次数不能为负数")
         with self._lock, _interprocess_path_lock(self.path):
             current = self._snapshot_unlocked()
-            if current.used + calls > current.budget:
+            if current.budget and current.used + calls > current.budget:
                 raise DailyQuotaExceeded(current.used, current.budget, current.reset_at)
             updated = QuotaSnapshot(
                 day=current.day,

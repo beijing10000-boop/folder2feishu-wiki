@@ -29,6 +29,12 @@ def test_quota_release_never_goes_negative(tmp_path: Path) -> None:
     assert quota.release(20).used == 0
 
 
+def test_zero_budget_records_usage_without_stopping(tmp_path: Path) -> None:
+    quota = DailyQuotaStore(tmp_path / "quota.json", budget=0)
+    assert quota.reserve(100_000).used == 100_000
+    assert quota.snapshot().budget == 0
+
+
 def test_two_store_instances_share_one_atomic_process_lock(tmp_path: Path) -> None:
     path = tmp_path / "shared-quota.json"
     stores = [DailyQuotaStore(path, budget=1_000) for _ in range(2)]

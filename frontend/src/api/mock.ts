@@ -44,7 +44,7 @@ let settings: AppSettings = {
   app_secret_configured: true,
   upload_qps: 4,
   wiki_calls_per_minute: 90,
-  daily_upload_budget: 9_500
+  daily_upload_budget: 0
 };
 
 const auth: AuthStatus = {
@@ -148,10 +148,10 @@ const checks = [
   {
     code: "ONEDRIVE_PLACEHOLDER",
     title: "OneDrive 本地可用性",
-    message: "12 个文件仍是云端占位，请先选择“始终保留在此设备上”",
-    severity: "error" as const,
-    count: 12,
-    blocking: true
+    message: "本地源目录中的文件均已下载，可进行只读迁移盘点",
+    severity: "ok" as const,
+    count: 0,
+    blocking: false
   },
   {
     code: "ZERO_BYTE",
@@ -186,13 +186,13 @@ const scan: ScanResult = {
     folders: 4_218,
     bytes: 198_212_829_184,
     empty_files: 3,
-    placeholders: 12,
+    placeholders: 0,
     too_long_names: 2,
     unreadable: 0,
     max_depth: 9,
     max_siblings: 346,
     upload_calls: 36_109,
-    estimated_days: 4,
+    estimated_days: 0,
     scan_complete: true
   },
   checks,
@@ -257,7 +257,7 @@ const plan: MigrationPlan = {
   total_actions: 41_227,
   writable_actions: 39_924,
   estimated_upload_calls: 36_109,
-  estimated_days: 4,
+  estimated_days: 0,
   confirmed: true,
   actions
 };
@@ -351,7 +351,7 @@ const getRun = (): RunSummary => {
     eta_seconds: runState === "RUNNING" ? 98_840 : undefined,
     quota: {
       upload_calls_used: 8_742,
-      upload_calls_limit: 9_500,
+      upload_calls_limit: 0,
       wiki_calls_minute: 41,
       wiki_calls_limit: 90,
       next_reset_at: "2026-07-31T00:00:00+08:00"
@@ -373,7 +373,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "1.0.0-rc.5-demo",
+      version: "1.0.0-rc.6-demo",
       database: "ok"
     } as T;
   }
