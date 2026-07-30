@@ -131,6 +131,45 @@ describe("配置优先迁移向导", () => {
     expect(within(rail).getByText("预检").closest("button")).toBeDisabled();
   });
 
+  it("已有大目录的后台数据未返回时也立即显示主界面", async () => {
+    const project: Project = {
+      id: "project-large-inventory",
+      name: "FabDazzle 全量迁移",
+      source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
+      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      create_wrapper: true,
+      wrapper_name: "Team FabDazzle - 文档",
+      mode: "safe_incremental"
+    };
+    apiMock.listProjects.mockResolvedValue([project]);
+    apiMock.getScan.mockResolvedValue({
+      scan_id: "large-scan",
+      status: "COMPLETED",
+      summary: {
+        files: 51_527,
+        folders: 6_536,
+        bytes: 307_000_000_000,
+        placeholders: 0,
+        unreadable: 0,
+        empty_files: 184,
+        too_long_names: 0,
+        max_depth: 9,
+        max_siblings: 121,
+        upload_calls: 104_606,
+        estimated_days: 0,
+        scan_complete: true
+      },
+      checks: [],
+      tree: []
+    });
+    apiMock.getTree.mockReturnValue(new Promise(() => undefined));
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText("正在建立本机安全会话")).not.toBeInTheDocument();
+  });
+
   it("已保存配置仍需真实逐项验证，通过后才开放盘点步骤", async () => {
     const settings: AppSettings = {
       ...emptySettings,
