@@ -91,7 +91,7 @@ const body = (value: unknown): Pick<RequestInit, "body" | "headers"> => ({
 
 const emptyQuota = {
   upload_calls_used: 0,
-  upload_calls_limit: 9_500,
+  upload_calls_limit: 0,
   wiki_calls_minute: 0,
   wiki_calls_limit: 90
 };
@@ -211,7 +211,7 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
       ...emptyQuota,
       ...quota,
       upload_calls_used: quota.upload_calls_used ?? quota.used ?? 0,
-      upload_calls_limit: quota.upload_calls_limit ?? quota.budget ?? 9_500,
+      upload_calls_limit: quota.upload_calls_limit ?? quota.budget ?? 0,
       next_reset_at: quota.next_reset_at ?? quota.reset_at
     }
   };
@@ -242,7 +242,7 @@ export const api = {
       app_secret_configured: value.app_secret_configured ?? value.secret_configured ?? false,
       upload_qps: Number(value.upload_qps ?? 4),
       wiki_calls_per_minute: Number(value.wiki_calls_per_minute ?? 90),
-      daily_upload_budget: Number(value.daily_upload_budget ?? 9_500)
+      daily_upload_budget: Number(value.daily_upload_budget ?? 0)
     })),
   saveSettings: (value: AppSettingsInput) =>
     request<Record<string, any>>(`${API_ROOT}/settings`, {
@@ -255,7 +255,7 @@ export const api = {
       app_secret_configured: saved.app_secret_configured ?? saved.secret_configured ?? false,
       upload_qps: Number(saved.upload_qps ?? 4),
       wiki_calls_per_minute: Number(saved.wiki_calls_per_minute ?? 90),
-      daily_upload_budget: Number(saved.daily_upload_budget ?? 9_500)
+      daily_upload_budget: Number(saved.daily_upload_budget ?? 0)
     })),
   getAuthStatus: () => request<AuthStatus>(`${API_ROOT}/auth/status`),
   startAuth: () =>

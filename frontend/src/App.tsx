@@ -20,6 +20,7 @@ import {
   FolderTree,
   Gauge,
   HardDrive,
+  Infinity,
   KeyRound,
   ListFilter,
   LoaderCircle,
@@ -120,7 +121,7 @@ const steps: Array<{
     no: "05",
     eyebrow: "CONTROL",
     label: "运行对账",
-    description: "断点、配额与证据",
+    description: "断点、速率与证据",
     icon: Gauge
   }
 ];
@@ -170,7 +171,7 @@ const emptySettings: AppSettings = {
   app_secret_configured: false,
   upload_qps: 4,
   wiki_calls_per_minute: 90,
-  daily_upload_budget: 9_500
+  daily_upload_budget: 0
 };
 
 const emptyDraft: ProjectDraft = {
@@ -197,7 +198,7 @@ type ValidationState = Record<
 const emptyValidation: ValidationState = {
   app: { status: "idle", message: "尚未验证应用配置" },
   oauth: { status: "idle", message: "尚未验证固定操作身份" },
-  throttle: { status: "idle", message: "尚未验证限流与每日预算" },
+  throttle: { status: "idle", message: "尚未验证上传与知识库并发速率" },
   source: { status: "idle", message: "尚未检查本地根目录配置" },
   target: { status: "idle", message: "尚未检查知识库地址" },
   policy: { status: "idle", message: "尚未检查增量策略" }
@@ -544,12 +545,10 @@ function App() {
               currentSettings.upload_qps > 0 &&
               currentSettings.upload_qps <= 4 &&
               currentSettings.wiki_calls_per_minute >= 1 &&
-              currentSettings.wiki_calls_per_minute <= 90 &&
-              currentSettings.daily_upload_budget >= 1 &&
-              currentSettings.daily_upload_budget <= 9_500
+              currentSettings.wiki_calls_per_minute <= 90
                 ? "passed"
                 : "idle",
-            message: "限流与每日预算已加载，仍受飞书服务端配额约束"
+            message: "并发速率已加载；上传调用总次数不设应用侧上限"
           },
           source: {
             status: "idle",
@@ -663,10 +662,7 @@ function App() {
     settings.upload_qps <= 4 &&
     Number.isInteger(settings.wiki_calls_per_minute) &&
     settings.wiki_calls_per_minute >= 1 &&
-    settings.wiki_calls_per_minute <= 90 &&
-    Number.isInteger(settings.daily_upload_budget) &&
-    settings.daily_upload_budget >= 1 &&
-    settings.daily_upload_budget <= 9_500;
+    settings.wiki_calls_per_minute <= 90;
 
   const validateApp = async (): Promise<boolean> => {
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
@@ -675,7 +671,7 @@ function App() {
       return false;
     }
     if (!throttleConfigurationValid()) {
-      markValidation("app", "failed", "后端会原子保存全部设置，请先修正限流与每日预算");
+      markValidation("app", "failed", "后端会原子保存全部设置，请先修正并发速率");
       return false;
     }
     try {
@@ -686,7 +682,7 @@ function App() {
         scopes: DEFAULT_SCOPES,
         upload_qps: settings.upload_qps,
         wiki_calls_per_minute: settings.wiki_calls_per_minute,
-        daily_upload_budget: settings.daily_upload_budget
+        daily_upload_budget: 0
       });
       setSettings(saved);
       setSecret("");
@@ -703,12 +699,12 @@ function App() {
   };
 
   const validateThrottle = async (): Promise<boolean> => {
-    markValidation("throttle", "checking", "正在验证上传节流、Wiki 频率和每日预算…");
+    markValidation("throttle", "checking", "正在验证上传与 Wiki 并发速率…");
     if (!throttleConfigurationValid()) {
       markValidation(
         "throttle",
         "failed",
-        "范围必须为：0 < 上传 QPS ≤ 4、Wiki 1–90 次/分钟、每日 1–9500 次"
+        "范围必须为：0 < 上传 QPS ≤ 4、Wiki 1–90 次/分钟"
       );
       return false;
     }
@@ -724,21 +720,21 @@ function App() {
         scopes: DEFAULT_SCOPES,
         upload_qps: settings.upload_qps,
         wiki_calls_per_minute: settings.wiki_calls_per_minute,
-        daily_upload_budget: settings.daily_upload_budget
+        daily_upload_budget: 0
       });
       setSettings(saved);
       setSecret("");
       markValidation(
         "throttle",
         "passed",
-        `${saved.upload_qps} QPS · ${saved.wiki_calls_per_minute} Wiki/分钟 · ${saved.daily_upload_budget} 上传/日`
+        `${saved.upload_qps} QPS · ${saved.wiki_calls_per_minute} Wiki/分钟 · 调用总次数不设上限`
       );
       return true;
     } catch (error) {
       markValidation(
         "throttle",
         "failed",
-        error instanceof Error ? error.message : "限流与每日预算保存失败"
+        error instanceof Error ? error.message : "并发速率保存失败"
       );
       return false;
     }
@@ -1180,8 +1176,8 @@ function App() {
             <i />
           </span>
           <div>
-            <span>FOLDER2FEISHU / WIKI</span>
-            <strong>迁移作业台</strong>
+            <span>Folder2Feishu Wiki</span>
+            <strong>文件迁移控制台</strong>
           </div>
         </div>
         <div className="topbar__route" aria-label="迁移方向">
@@ -1322,7 +1318,7 @@ function App() {
                   [
                     ["app", "01", "飞书应用", "App ID / Secret / 回调地址"],
                     ["oauth", "02", "OAuth 身份", "固定用户与完整权限范围"],
-                    ["throttle", "03", "调用限额", "QPS / Wiki 频率 / 日预算"],
+                    ["throttle", "03", "并发速率", "上传 QPS / Wiki 操作频率"],
                     ["source", "04", "本地来源", "Windows 绝对路径"],
                     ["target", "05", "知识库落点", "Wiki 父节点 URL"],
                     ["policy", "06", "安全策略", "根节点与安全增量"]
@@ -1489,14 +1485,14 @@ function App() {
             <div className="config-operations-grid">
               <Panel>
                 <PanelHeading
-                  eyebrow="RATE & QUOTA ENVELOPE"
-                  title="上传限流与每日调用预算"
-                  copy="客户端主动低于飞书上限；服务端 429 或配额窗口仍会触发安全暂停。"
+                  eyebrow="RATE CONTROL"
+                  title="上传与知识库并发速率"
+                  copy="工具不限制调用总次数；服务端返回 429 或临时错误时自动退避重试。"
                   icon={Gauge}
                   tools={<ValidationBadge {...validation.throttle} />}
                 />
                 <div className="operation-config">
-                  <div className="field-grid field-grid--three">
+                  <div className="field-grid">
                     <Field label="文件上传 QPS" required hint="范围：大于 0 且不超过 4">
                       <input
                         type="number"
@@ -1531,29 +1527,12 @@ function App() {
                         }}
                       />
                     </Field>
-                    <Field label="每日上传调用预算" required hint="范围：1–9500">
-                      <input
-                        type="number"
-                        min="1"
-                        max="9500"
-                        step="1"
-                        value={settings.daily_upload_budget}
-                        onChange={(event) => {
-                          setSettings({
-                            ...settings,
-                            daily_upload_budget: Number(event.target.value || 0)
-                          });
-                          markValidation("throttle", "idle", "每日预算已修改，请重新验证");
-                          setPlan(undefined);
-                        }}
-                      />
-                    </Field>
                   </div>
                   <div className="quota-rule">
-                    <Gauge size={17} />
+                    <Infinity size={17} />
                     <span>
-                      <strong>自动保护</strong>
-                      达到约定日预算后暂停并保留断点，在下一配额窗口恢复。
+                      <strong>调用总次数不设上限</strong>
+                      仅保留必要的 QPS 节流、429 退避和断点恢复保护。
                     </span>
                   </div>
                   <Button
@@ -1561,7 +1540,7 @@ function App() {
                     busy={validation.throttle.status === "checking"}
                     onClick={validateThrottle}
                   >
-                    验证并保存调用限额
+                    验证并保存并发速率
                   </Button>
                 </div>
               </Panel>
@@ -1947,7 +1926,7 @@ function App() {
                     icon={Cloud}
                     label="预计上传 API 调用"
                     value={scan.summary.upload_calls.toLocaleString()}
-                    note={`大文件分片会多次调用 · 约 ${scan.summary.estimated_days} 个自然日`}
+                    note="大文件分片会产生多次调用 · 总次数不设上限"
                     tone="amber"
                   />
                 </div>
@@ -2038,7 +2017,7 @@ function App() {
                 <div>
                   <span className="eyebrow">IMMUTABLE WRITE PROPOSAL · {plan.id}</span>
                   <h2>每一项远端动作，先看清再执行</h2>
-                  <p>生成于 {new Date(plan.created_at).toLocaleString("zh-CN")} · 预计跨 {plan.estimated_days} 个自然日</p>
+                  <p>生成于 {new Date(plan.created_at).toLocaleString("zh-CN")} · 调用总次数不设上限</p>
                 </div>
                 <div className={`confirmation-seal ${plan.confirmed ? "is-confirmed" : ""}`}>
                   {plan.confirmed ? <BadgeCheck size={22} /> : <FileClock size={22} />}
@@ -2190,13 +2169,17 @@ function App() {
                   </div>
                 </Panel>
                 <Panel className="quota-panel">
-                  <span className="eyebrow">DAILY UPLOAD BUDGET</span>
-                  <div className="quota-dial" style={{ "--quota": `${formatPercent(run.quota.upload_calls_used, run.quota.upload_calls_limit)}%` } as React.CSSProperties}>
-                    <span><strong>{run.quota.upload_calls_used.toLocaleString()}</strong><small>/ {run.quota.upload_calls_limit.toLocaleString()}</small></span>
+                  <span className="eyebrow">UPLOAD API CALLS</span>
+                  <div className="quota-unlimited">
+                    <Infinity size={28} aria-hidden="true" />
+                    <span>
+                      <strong>{run.quota.upload_calls_used.toLocaleString()}</strong>
+                      <small>已调用</small>
+                    </span>
                   </div>
                   <div className="quota-panel__copy">
                     <span>Wiki 节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
-                    <span>配额耗尽时自动暂停，不丢断点</span>
+                    <span>调用总次数不设上限；429 自动退避</span>
                   </div>
                 </Panel>
               </div>
@@ -2279,7 +2262,7 @@ function App() {
               <EmptyState
                 icon={PanelTop}
                 title="尚无迁移运行"
-                copy="确认差异计划后，运行页会展示实时进度、配额、失败队列和远端证据。"
+                copy="确认差异计划后，运行页会展示实时进度、接口速率、失败队列和远端证据。"
                 action={<Button icon={ArrowRight} onClick={() => setStep("plan")}>返回差异计划</Button>}
               />
             </Panel>

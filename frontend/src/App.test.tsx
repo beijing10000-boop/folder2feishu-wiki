@@ -53,7 +53,7 @@ const emptySettings: AppSettings = {
   app_secret_configured: false,
   upload_qps: 4,
   wiki_calls_per_minute: 90,
-  daily_upload_budget: 9_500
+  daily_upload_budget: 0
 };
 
 const emptyAuth: AuthStatus = {
@@ -116,11 +116,11 @@ describe("配置优先迁移向导", () => {
 
     expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
     expect(screen.getByText("飞书应用与本机安全配置")).toBeInTheDocument();
-    expect(screen.getByText("上传限流与每日调用预算")).toBeInTheDocument();
+    expect(screen.getByText("上传与知识库并发速率")).toBeInTheDocument();
     expect(screen.getByText("唯一来源、唯一落点与安全增量")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证应用配置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证当前身份" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "验证并保存调用限额" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "验证并保存并发速率" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证本地目录配置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证知识库地址" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证安全策略" })).toBeInTheDocument();

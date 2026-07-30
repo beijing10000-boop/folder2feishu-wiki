@@ -338,7 +338,7 @@ def create_app(
             port=current.port,
             upload_qps=value.upload_qps,
             wiki_calls_per_minute=value.wiki_calls_per_minute,
-            daily_upload_budget=value.daily_upload_budget,
+            daily_upload_budget=0,
             open_browser=current.open_browser,
         )
         return services.save_settings(settings, app_secret=value.app_secret)

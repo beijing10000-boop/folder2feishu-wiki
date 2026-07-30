@@ -315,8 +315,7 @@ def test_zero_byte_file_is_reported_and_skipped_without_remote_write(
         assert first.failed == first.conflicts == 0
         assert drive.uploads == 0
         assert [
-            mapping.last_source_rel_path
-            for mapping in store.list_remote_mappings(project.id)
+            mapping.last_source_rel_path for mapping in store.list_remote_mappings(project.id)
         ] == [""]
         zero_action = next(
             action

@@ -37,6 +37,16 @@ def test_settings_roundtrip_never_contains_secret(tmp_path: Path) -> None:
     assert "secret" not in " ".join(on_disk).lower()
 
 
+def test_legacy_daily_budget_is_migrated_to_unlimited(tmp_path: Path) -> None:
+    paths = RuntimePaths.discover(tmp_path / "state").ensure()
+    paths.settings.write_text(
+        json.dumps({"app_id": "cli_example", "daily_upload_budget": 9_500}),
+        encoding="utf-8",
+    )
+    loaded = SettingsStore(paths).load()
+    assert loaded.daily_upload_budget == 0
+
+
 def test_settings_reject_external_bind_and_missing_scope() -> None:
     with pytest.raises(ValueError, match="127.0.0.1"):
         PublicSettings(host="0.0.0.0").validate()

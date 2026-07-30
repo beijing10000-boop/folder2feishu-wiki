@@ -435,7 +435,7 @@ class MigrationExecutor:
             self.store.append_audit(
                 project_id,
                 "migration.finished",
-                "迁移运行已结束" if not quota_paused else "达到每日预算，已安全暂停",
+                "迁移运行已结束" if not quota_paused else "接口调用受限，已安全暂停",
                 level=(
                     AuditLevel.WARNING if quota_paused or failed or conflicts else AuditLevel.INFO
                 ),
