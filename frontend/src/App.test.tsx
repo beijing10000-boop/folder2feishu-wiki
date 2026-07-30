@@ -73,6 +73,7 @@ function rejectOptionalProjectReads() {
 describe("配置优先迁移向导", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     apiMock.getSession.mockResolvedValue({ ready: true });
     apiMock.health.mockResolvedValue({ ok: true, version: "2.0-test" });
     apiMock.getSettings.mockResolvedValue(emptySettings);
@@ -237,5 +238,71 @@ describe("配置优先迁移向导", () => {
     activeButtons.forEach((button) => expect(button).toBeDisabled());
     expect(apiMock.getPreflight).not.toHaveBeenCalled();
     expect(apiMock.startScan).not.toHaveBeenCalled();
+  });
+
+  it("浏览器刷新后恢复原步骤，页面内刷新不跳回配置", async () => {
+    const settings: AppSettings = {
+      ...emptySettings,
+      app_id: "cli_configured",
+      app_secret_configured: true
+    };
+    const auth: AuthStatus = {
+      configured: true,
+      authorized: true,
+      user_name: "迁移管理员",
+      scopes
+    };
+    const project: Project = {
+      id: "project-persisted-step",
+      name: "JF 文档迁移",
+      source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
+      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      create_wrapper: true,
+      wrapper_name: "Team FabDazzle - 文档",
+      mode: "safe_incremental"
+    };
+    const completedScan: ScanResult = {
+      scan_id: "scan-completed",
+      status: "COMPLETED",
+      summary: {
+        files: 403,
+        folders: 97,
+        bytes: 3_400_000_000,
+        placeholders: 0,
+        unreadable: 0,
+        empty_files: 0,
+        too_long_names: 0,
+        max_depth: 7,
+        max_siblings: 154,
+        upload_calls: 1_089,
+        estimated_days: 1,
+        scan_complete: true
+      },
+      checks: [],
+      tree: []
+    };
+    window.localStorage.setItem("folder2feishu:last-step", "scan");
+    apiMock.getSettings.mockResolvedValue(settings);
+    apiMock.getAuthStatus.mockResolvedValue(auth);
+    apiMock.listProjects.mockResolvedValue([project]);
+    apiMock.getScan.mockResolvedValue(completedScan);
+    apiMock.getPreflight.mockResolvedValue({
+      complete: true,
+      writable: true,
+      checked_at: "2026-07-30T08:00:00Z",
+      checks: []
+    });
+    apiMock.getTree.mockResolvedValue([]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "盘点", level: 1 })).toBeInTheDocument();
+    expect(window.localStorage.getItem("folder2feishu:last-step")).toBe("scan");
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新当前页面数据" }));
+
+    await waitFor(() => expect(apiMock.health).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("heading", { name: "盘点", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByText("当前页面数据已刷新，所在步骤保持不变。")).toBeInTheDocument();
   });
 });

@@ -428,6 +428,11 @@ class ApplicationServices:
         project = self.store.get_project(project_id)
         items = self.store.list_inventory(project_id, present=True)
         issues = self.store.list_issues(project_id, scan_id=project.current_scan_id)
+        scan_run_summary: dict[str, Any] = {}
+        for run in self.store.list_job_runs(project_id, limit=20):
+            if run.scan_id == project.current_scan_id:
+                scan_run_summary = dict(run.summary or {})
+                break
         files = [item for item in items if item.kind.value == "FILE"]
         folders = [item for item in items if item.kind.value == "FOLDER"]
         calls = sum(
@@ -454,6 +459,8 @@ class ApplicationServices:
             "max_depth": max((item.depth for item in items), default=0),
             "max_siblings": self._max_siblings(items),
             "upload_calls": calls,
+            "hashes_computed": int(scan_run_summary.get("hashes_computed", 0)),
+            "hashes_reused": int(scan_run_summary.get("hashes_reused", 0)),
             "estimated_days": math.ceil(calls / self.settings_store.load().daily_upload_budget)
             if calls
             else 0,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 
 from folder2feishu.core import (
     CoreStore,
@@ -9,6 +11,7 @@ from folder2feishu.core import (
     ItemKind,
     file_attribute_flags,
 )
+from folder2feishu.core import scanner as scanner_module
 from folder2feishu.core.scanner import (
     FILE_ATTRIBUTE_OFFLINE,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
@@ -113,5 +116,109 @@ def test_scanner_never_commits_more_than_configured_batch(tmp_path):
         assert result.complete
         assert max(observed_batch_sizes) <= 32
         assert len(observed_batch_sizes) > 2
+    finally:
+        store.close()
+
+
+def test_unchanged_second_scan_reuses_previous_hashes(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.txt").write_bytes(b"one")
+    (source / "two.txt").write_bytes(b"two")
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="incremental", source_root=source)
+        first = InventoryScanner(store, hash_workers=2).scan(project.id)
+        assert first.complete
+
+        def unexpected_hash(*args, **kwargs):
+            raise AssertionError("unchanged files must reuse their durable SHA-256")
+
+        monkeypatch.setattr(scanner_module, "sha256_file", unexpected_hash)
+        second = InventoryScanner(store, hash_workers=2).scan(project.id)
+
+        assert second.complete
+        summary = store.get_job_run(second.run_id).summary
+        assert summary["hashes_reused"] == 2
+        assert summary["hashes_computed"] == 0
+    finally:
+        store.close()
+
+
+def test_changed_file_is_rehashed_while_unchanged_file_is_reused(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    changed = source / "changed.txt"
+    unchanged = source / "unchanged.txt"
+    changed.write_bytes(b"before")
+    unchanged.write_bytes(b"stable")
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="incremental", source_root=source)
+        first = InventoryScanner(store, hash_workers=2).scan(project.id)
+        assert first.complete
+
+        changed.write_bytes(b"after-with-a-different-size")
+        original_hash = scanner_module.sha256_file
+        hashed_paths = []
+
+        def observed_hash(path, **kwargs):
+            hashed_paths.append(path.name)
+            return original_hash(path, **kwargs)
+
+        monkeypatch.setattr(scanner_module, "sha256_file", observed_hash)
+        second = InventoryScanner(store, hash_workers=2).scan(project.id)
+
+        assert second.complete
+        assert hashed_paths == ["changed.txt"]
+        summary = store.get_job_run(second.run_id).summary
+        assert summary["hashes_reused"] == 1
+        assert summary["hashes_computed"] == 1
+    finally:
+        store.close()
+
+
+def test_initial_scan_hashes_files_with_bounded_parallel_workers(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(8):
+        folder = source / f"folder-{index}"
+        folder.mkdir()
+        (folder / f"{index}.txt").write_bytes(f"payload-{index}".encode())
+
+    original_hash = scanner_module.sha256_file
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def observed_hash(path, **kwargs):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.03)
+            return original_hash(path, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(scanner_module, "sha256_file", observed_hash)
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="parallel", source_root=source)
+        result = InventoryScanner(
+            store,
+            hash_workers=4,
+            hash_queue_size=8,
+        ).scan(project.id)
+
+        assert result.complete
+        assert maximum_active >= 2
+        summary = store.get_job_run(result.run_id).summary
+        assert summary["hashes_computed"] == 8
+        assert summary["hashes_reused"] == 0
     finally:
         store.close()

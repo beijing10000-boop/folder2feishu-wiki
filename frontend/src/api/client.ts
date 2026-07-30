@@ -137,6 +137,8 @@ const normalizeScan = (raw: Record<string, any>): ScanResult => {
       max_depth: counts.max_depth ?? 0,
       max_siblings: counts.max_siblings ?? 0,
       upload_calls: counts.upload_calls ?? raw.estimated_upload_calls ?? 0,
+      hashes_computed: counts.hashes_computed ?? 0,
+      hashes_reused: counts.hashes_reused ?? 0,
       estimated_days: counts.estimated_days ?? raw.estimated_days ?? 0,
       scan_complete: raw.complete ?? counts.scan_complete ?? status === "COMPLETED"
     },

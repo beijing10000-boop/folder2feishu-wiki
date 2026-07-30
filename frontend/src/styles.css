@@ -221,6 +221,37 @@ summary {
   padding: 0 1.1rem;
 }
 
+.page-refresh {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid rgba(57, 217, 138, 0.24);
+  background: rgba(57, 217, 138, 0.045);
+  color: #8ba5af;
+  font: 700 0.66rem Bahnschrift, "Microsoft YaHei UI", sans-serif;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.page-refresh:hover:not(:disabled),
+.page-refresh:focus-visible {
+  color: var(--green);
+  border-color: rgba(57, 217, 138, 0.58);
+  background: rgba(57, 217, 138, 0.1);
+  outline: none;
+}
+
+.page-refresh:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .live-signal,
 .demo-flag {
   display: inline-flex;
@@ -2881,6 +2912,14 @@ input::placeholder {
 
   .topbar__status {
     padding-right: 0.7rem;
+  }
+
+  .page-refresh span {
+    display: none;
+  }
+
+  .page-refresh {
+    padding-inline: 0.55rem;
   }
 
   .workspace-heading {
