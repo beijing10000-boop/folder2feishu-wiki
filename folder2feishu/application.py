@@ -64,6 +64,9 @@ class QuotaCapacityUnknown(FeishuError):
     """The tenant is not over quota, but no comparable CCM limit was returned."""
 
 
+PLAN_PREVIEW_PER_KIND = 200
+
+
 class ApplicationServices:
     """Own process-wide stores without ever returning secrets to the browser."""
 
@@ -526,8 +529,11 @@ class ApplicationServices:
             }
         inventory = {item.id: item for item in self.store.list_inventory(project_id)}
         counts: dict[str, int] = {}
+        preview_counts: dict[str, int] = {}
         rows: list[dict[str, Any]] = []
         upload_calls = 0
+        writable_actions = 0
+        blocking_conflicts = 0
         for action in actions:
             kind = action.action_type.value
             counts[kind] = counts.get(kind, 0) + 1
@@ -544,24 +550,29 @@ class ApplicationServices:
                     if size <= 20 * 1024 * 1024
                     else 2 + math.ceil(size / (4 * 1024 * 1024))
                 )
-            rows.append(
-                {
-                    "id": action.id,
-                    "kind": kind,
-                    "action": kind.lower(),
-                    "relative_path": action.source_rel_path or action.previous_rel_path,
-                    "previous_path": action.previous_rel_path or None,
-                    "reason": action.reason,
-                    "bytes": size,
-                    "size": size,
-                    "blocking": action.state
-                    in {
-                        MigrationState.CONFLICT,
-                        MigrationState.MANUAL_ACTION,
-                    },
-                    "status": action.state.value,
-                }
-            )
+            if action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}:
+                writable_actions += 1
+            blocking = action.state in {
+                MigrationState.CONFLICT,
+                MigrationState.MANUAL_ACTION,
+            }
+            blocking_conflicts += int(blocking)
+            if preview_counts.get(kind, 0) < PLAN_PREVIEW_PER_KIND:
+                rows.append(
+                    {
+                        "id": action.id,
+                        "kind": kind,
+                        "action": kind.lower(),
+                        "relative_path": action.source_rel_path or action.previous_rel_path,
+                        "previous_path": action.previous_rel_path or None,
+                        "reason": action.reason,
+                        "bytes": size,
+                        "size": size,
+                        "blocking": blocking,
+                        "status": action.state.value,
+                    }
+                )
+                preview_counts[kind] = preview_counts.get(kind, 0) + 1
         confirmed = all(
             bool((action.details or {}).get("plan_confirmed"))
             for action in actions
@@ -575,14 +586,12 @@ class ApplicationServices:
             "actions": rows,
             "items": rows,
             "total_actions": len(actions),
-            "writable_actions": sum(
-                action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}
-                for action in actions
-            ),
+            "writable_actions": writable_actions,
             "estimated_upload_calls": upload_calls,
             "estimated_days": 0,
             "confirmed": confirmed,
-            "blocking_conflicts": sum(row["blocking"] for row in rows),
+            "blocking_conflicts": blocking_conflicts,
+            "preview_limit_per_kind": PLAN_PREVIEW_PER_KIND,
         }
 
     def confirm_latest_plan(self, project_id: str) -> dict[str, Any]:
@@ -594,8 +603,7 @@ class ApplicationServices:
             for action in actions
         ):
             raise ValueError("计划仍包含冲突或人工处理项")
-        for action in actions:
-            self.store.update_plan_action(action.id, merge_details={"plan_confirmed": True})
+        self.store.confirm_plan_actions(project_id, actions[0].plan_id)
         self.store.append_audit(
             project_id,
             "plan.confirmed",

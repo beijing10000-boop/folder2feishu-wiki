@@ -429,6 +429,27 @@ class CoreStore:
                 raise KeyError(f"unknown planned action: {action_id}")
             return action
 
+    def confirm_plan_actions(self, project_id: str, plan_id: str) -> int:
+        """Mark one complete plan as confirmed in a single transaction."""
+
+        with self.session() as session:
+            actions = list(
+                session.scalars(
+                    select(PlannedAction).where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                    )
+                )
+            )
+            for action in actions:
+                action.details = {
+                    **(action.details or {}),
+                    "plan_confirmed": True,
+                }
+                action.updated_at = utc_now()
+            session.flush()
+            return len(actions)
+
     def update_plan_action(
         self,
         action_id: str,
