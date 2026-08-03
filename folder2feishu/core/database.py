@@ -972,6 +972,74 @@ class CoreStore:
             session.flush()
             return action
 
+    def prepare_folder_create_action(self, action_id: str) -> tuple[PlannedAction, bool]:
+        """Persist folder-create intent and return its current durable state.
+
+        The intent must commit before the remote POST. Combining the previous
+        read and write into one transaction removes a hot-path SQLite round
+        trip without weakening crash recovery.
+        """
+
+        with self.session() as session:
+            action = session.get(PlannedAction, action_id)
+            if action is None:
+                raise KeyError(f"unknown planned action: {action_id}")
+            details = dict(action.details or {})
+            direct_create = not action.wiki_node_token and not details.get("folder_create_started")
+            if direct_create:
+                details["folder_create_started"] = True
+                action.details = details
+                action.state = MigrationState.VERIFYING
+                action.updated_at = utc_now()
+            session.flush()
+            return action, direct_create
+
+    def complete_plan_action_with_mapping(
+        self,
+        action_id: str,
+        *,
+        wiki_node_token: str,
+        object_token: str,
+        mapping_values: Mapping[str, Any],
+        merge_details: Mapping[str, Any] | None = None,
+    ) -> tuple[PlannedAction, RemoteMapping]:
+        """Atomically persist final action evidence and its remote mapping."""
+
+        with self.session() as session:
+            action = session.get(PlannedAction, action_id)
+            if action is None:
+                raise KeyError(f"unknown planned action: {action_id}")
+            action.state = MigrationState.DONE
+            action.wiki_node_token = wiki_node_token
+            action.object_token = object_token
+            if merge_details:
+                action.details = {**(action.details or {}), **dict(merge_details)}
+            action.updated_at = utc_now()
+
+            values = dict(mapping_values)
+            mapping_id = values.get("id")
+            project_id = values.get("project_id")
+            source_path = values.get("last_source_rel_path")
+            mapping = session.get(RemoteMapping, mapping_id) if mapping_id else None
+            if mapping is None and project_id and source_path is not None:
+                mapping = session.scalar(
+                    select(RemoteMapping).where(
+                        RemoteMapping.project_id == project_id,
+                        RemoteMapping.last_source_rel_path == source_path,
+                        RemoteMapping.is_current.is_(True),
+                    )
+                )
+            if mapping is None:
+                mapping = RemoteMapping(**values)
+                session.add(mapping)
+            else:
+                for key, value in values.items():
+                    if key != "id":
+                        setattr(mapping, key, value)
+                mapping.updated_at = utc_now()
+            session.flush()
+            return action, mapping
+
     # Remote mappings
     def upsert_remote_mapping(self, **values: Any) -> RemoteMapping:
         mapping_id = values.get("id")

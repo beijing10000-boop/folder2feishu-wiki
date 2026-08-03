@@ -25,14 +25,24 @@ class PublicSettings:
     host: str = "127.0.0.1"
     port: int = 8000
     upload_qps: float = 4.0
-    wiki_calls_per_minute: int = 90
+    wiki_calls_per_minute: int = 100
     daily_upload_budget: int = 0
     open_browser: bool = True
+    runtime_tuning_version: int = 2
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> PublicSettings:
         allowed = cls.__dataclass_fields__.keys()
         payload = {key: item for key, item in value.items() if key in allowed}
+        # v1 used 90/min as a conservative default. The official node-create
+        # limit is 100/min; migrate only that old default, while preserving any
+        # deliberately lower custom value.
+        if (
+            int(value.get("runtime_tuning_version", 1)) < 2
+            and int(payload.get("wiki_calls_per_minute", 90)) == 90
+        ):
+            payload["wiki_calls_per_minute"] = 100
+        payload["runtime_tuning_version"] = 2
         # Older releases persisted a conservative 9,500-call application budget.
         # The migration worker now runs without an application-level daily cap.
         payload["daily_upload_budget"] = 0
@@ -53,8 +63,8 @@ class PublicSettings:
             raise ValueError(f"缺少必需的飞书权限：{missing}")
         if not 0 < float(self.upload_qps) <= 4.0:
             raise ValueError("上传速率必须大于 0 且不超过 4 QPS")
-        if not 1 <= int(self.wiki_calls_per_minute) <= 90:
-            raise ValueError("知识库调用频率必须在 1 到 90 次/分钟之间")
+        if not 1 <= int(self.wiki_calls_per_minute) <= 100:
+            raise ValueError("知识库调用频率必须在 1 到 100 次/分钟之间")
         if int(self.daily_upload_budget) != 0:
             raise ValueError("应用侧调用限制必须为 0（不设累计总次数上限）")
 

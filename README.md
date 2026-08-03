@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.3/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.4/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -109,6 +109,15 @@ DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 - SQLite 中没有时区标记的历史 UTC 时间会先按 UTC 解析，再转换为当前 Windows/浏览器本地时间。
 - 修复右侧审计时间和差异计划生成时间少 8 小时的问题；无需修改电脑时区或历史台账。
 
+### 2.0.0-rc.4 迁移流水线性能优化
+
+- 同一层级且互不依赖的知识库目录最多使用 4 个工作线程并行创建；下一级目录仍会等待父目录落库，目录结构不变。
+- 不同文件的“上传、迁入知识库、轮询、校验”使用有界并发流水线，单个文件失败不会阻塞其他文件。
+- 目录创建意图和最终 token 使用更少的 SQLite 事务；进度约每秒批量持久化一次，减少高频磁盘写入。
+- Wiki 写操作按飞书官方单应用上限调整为 100 次/分钟；旧版默认 90 会自动升级，自定义较低值保持不变。
+- 运行页显示并行工作线程和当前执行中项目数，暂停、停止、断点恢复和幂等防重规则保持不变。
+- 相同模拟网络延迟下，目录场景由 3.556 秒降至 1.263 秒（2.82 倍），目录加文件场景由 13.188 秒降至 4.008 秒（3.29 倍）。真实速度仍受飞书接口响应和限流影响。
+
 ## 飞书应用配置
 
 在飞书开放平台创建企业自建应用，申请并发布以下 OAuth 权限：
@@ -164,7 +173,7 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 - 不超过 20 MB 的文件直接上传；更大的文件按 4 MB 分片，分片会话和完成序号即时落库。
 - 每个请求使用非空 `parent_node`。获得 `file_token`、`task_id`、`wiki_token` 后立即写入 SQLite。
 - 请求超时先查询远端状态；不会因为本地未及时落库就盲目重传。
-- 上传队列最高 4 QPS，Wiki 操作最高 90 次/分钟；工具不限制每日累计调用次数，遇到飞书 429 或服务异常时自动退避重试。
+- 上传队列最高 4 QPS，Wiki 操作最高 100 次/分钟；工具不限制每日累计调用次数，遇到飞书 429 或服务异常时自动退避重试。
 - 飞书请求配置连接、读取、写入和连接池超时；临时网络错误有限次指数退避，等待期间仍可暂停或取消。
 - 文件、计划动作和远端映射均分批读取和写入；界面目录树按需展开，日志只增量读取，避免一次加载数万行。
 - SQLite 启用 WAL、`busy_timeout`、schema migration 和项目级执行锁；同一个项目不能被两个实例同时执行。

@@ -43,7 +43,7 @@ let settings: AppSettings = {
   ],
   app_secret_configured: true,
   upload_qps: 4,
-  wiki_calls_per_minute: 90,
+  wiki_calls_per_minute: 100,
   daily_upload_budget: 0
 };
 
@@ -353,7 +353,7 @@ const getRun = (): RunSummary => {
       upload_calls_used: 8_742,
       upload_calls_limit: 0,
       wiki_calls_minute: 41,
-      wiki_calls_limit: 90,
+      wiki_calls_limit: 100,
       next_reset_at: "2026-07-31T00:00:00+08:00"
     }
   };

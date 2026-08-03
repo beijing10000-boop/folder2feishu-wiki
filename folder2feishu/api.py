@@ -212,7 +212,8 @@ def _job_payload(
     elapsed_seconds = (
         max(0, int((datetime.now(UTC) - started_at).total_seconds())) if started_at else 0
     )
-    processed = run.completed_items + run.failed_items + run.skipped_items
+    run_summary = dict(run.summary or {})
+    processed = run.completed_items + run.failed_items
     eta_seconds = None
     if processed > 0 and run.total_items > processed and elapsed_seconds > 0:
         eta_seconds = int(elapsed_seconds / processed * (run.total_items - processed))
@@ -236,6 +237,8 @@ def _job_payload(
         "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
         "elapsed_seconds": elapsed_seconds,
         "retry_count": run.retry_count,
+        "worker_count": int(run_summary.get("workers", 0)),
+        "in_flight": int(run_summary.get("in_flight", 0)),
         "pause_requested": run.pause_requested,
         "cancel_requested": run.cancel_requested,
         "progress": {

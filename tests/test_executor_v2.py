@@ -206,6 +206,65 @@ class FakeWiki:
         return node_token
 
 
+class ParallelProbeWiki(FakeWiki):
+    """Expose whether independent Wiki creates overlap without timing assertions."""
+
+    def __init__(self, drive: FakeDrive) -> None:
+        super().__init__(drive)
+        self._active_lock = threading.Lock()
+        self._create_lock = threading.Lock()
+        self._overlap = threading.Event()
+        self.active = 0
+        self.max_active = 0
+
+    def create_docx_node(
+        self,
+        space_id: str,
+        title: str,
+        parent_node_token: str,
+    ) -> dict[str, str]:
+        with self._active_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active >= 2:
+                self._overlap.set()
+        self._overlap.wait(timeout=1)
+        try:
+            # FakeWiki uses a numeric token counter. Serialize only the fake
+            # result mutation; the simulated remote wait above remains parallel.
+            with self._create_lock:
+                return super().create_docx_node(space_id, title, parent_node_token)
+        finally:
+            with self._active_lock:
+                self.active -= 1
+
+
+class ParallelProbeDrive(FakeDrive):
+    """Expose whether independent file uploads overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active_lock = threading.Lock()
+        self._upload_lock = threading.Lock()
+        self._overlap = threading.Event()
+        self.active = 0
+        self.max_active = 0
+
+    def stage_file(self, *args: Any, **kwargs: Any) -> StagedFile:
+        with self._active_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active >= 2:
+                self._overlap.set()
+        self._overlap.wait(timeout=1)
+        try:
+            with self._upload_lock:
+                return super().stage_file(*args, **kwargs)
+        finally:
+            with self._active_lock:
+                self.active -= 1
+
+
 def _confirm(store: CoreStore, project_id: str) -> None:
     for action in store.list_plan_actions(project_id):
         store.update_plan_action(action.id, merge_details={"plan_confirmed": True})
@@ -232,6 +291,40 @@ def _build(tmp_path: Path) -> tuple[CoreStore, str, FakeDrive, FakeWiki]:
     drive = FakeDrive()
     wiki = FakeWiki(drive)
     return store, project.id, drive, wiki
+
+
+def test_executor_parallelizes_same_depth_folders_after_parent(tmp_path: Path) -> None:
+    store, project_id, drive, _wiki = _build(tmp_path)
+    wiki = ParallelProbeWiki(drive)
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        wiki,  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "parallel-folders-quota.json"),
+    ).execute(project_id)
+
+    assert result.failed == result.conflicts == 0
+    assert wiki.max_active >= 2
+    mappings = {
+        mapping.last_source_rel_path: mapping for mapping in store.list_remote_mappings(project_id)
+    }
+    assert mappings["部门 A/三级"].remote_parent_node_token == mappings["部门 A"].wiki_node_token
+
+
+def test_executor_parallelizes_independent_file_uploads(tmp_path: Path) -> None:
+    store, project_id, _drive, _wiki = _build(tmp_path)
+    drive = ParallelProbeDrive()
+    wiki = FakeWiki(drive)
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        wiki,  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "parallel-files-quota.json"),
+    ).execute(project_id)
+
+    assert result.failed == result.conflicts == 0
+    assert drive.uploads == 2
+    assert drive.max_active >= 2
 
 
 def test_first_run_second_run_move_and_version_update(tmp_path: Path) -> None:

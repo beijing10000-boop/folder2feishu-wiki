@@ -18,3 +18,9 @@ def test_settings_enforce_safe_rate_limits() -> None:
             app_secret="secret",
             upload_qps=5,
         )
+    with pytest.raises(ValidationError):
+        SettingsUpdate(
+            app_id="cli_test",
+            app_secret="secret",
+            wiki_calls_per_minute=101,
+        )

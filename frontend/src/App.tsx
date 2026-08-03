@@ -214,7 +214,7 @@ const emptySettings: AppSettings = {
   scopes: DEFAULT_SCOPES,
   app_secret_configured: false,
   upload_qps: 4,
-  wiki_calls_per_minute: 90,
+  wiki_calls_per_minute: 100,
   daily_upload_budget: 0
 };
 
@@ -644,7 +644,7 @@ function App() {
               currentSettings.upload_qps > 0 &&
               currentSettings.upload_qps <= 4 &&
               currentSettings.wiki_calls_per_minute >= 1 &&
-              currentSettings.wiki_calls_per_minute <= 90
+              currentSettings.wiki_calls_per_minute <= 100
                 ? "passed"
                 : "idle",
             message: "并发速率已加载；上传调用总次数不设应用侧上限"
@@ -834,7 +834,7 @@ function App() {
     settings.upload_qps <= 4 &&
     Number.isInteger(settings.wiki_calls_per_minute) &&
     settings.wiki_calls_per_minute >= 1 &&
-    settings.wiki_calls_per_minute <= 90;
+    settings.wiki_calls_per_minute <= 100;
 
   const validateApp = async (): Promise<boolean> => {
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
@@ -876,7 +876,7 @@ function App() {
       markValidation(
         "throttle",
         "failed",
-        "范围必须为：0 < 上传 QPS ≤ 4、Wiki 1–90 次/分钟"
+        "范围必须为：0 < 上传 QPS ≤ 4、Wiki 1–100 次/分钟"
       );
       return false;
     }
@@ -1313,9 +1313,7 @@ function App() {
   const activeStep = steps.find((item) => item.id === step) ?? steps[0];
   const progress = run ? formatPercent(run.completed, run.total) : 0;
   const byteProgress = run ? formatPercent(run.bytes_completed, run.bytes_total) : 0;
-  const runProcessed = run
-    ? run.completed + run.failed + (run.skipped ?? 0) + run.conflicts
-    : 0;
+  const runProcessed = run ? run.completed + run.failed + run.conflicts : 0;
   const blocking = preflight?.checks.filter((check) => check.blocking) ?? [];
   const filteredActions = useMemo(
     () =>
@@ -1748,11 +1746,11 @@ function App() {
                         }}
                       />
                     </Field>
-                    <Field label="Wiki 调用 / 分钟" required hint="范围：1–90">
+                    <Field label="Wiki 调用 / 分钟" required hint="范围：1–100">
                       <input
                         type="number"
                         min="1"
-                        max="90"
+                        max="100"
                         step="1"
                         value={settings.wiki_calls_per_minute}
                         onChange={(event) => {
@@ -2419,6 +2417,10 @@ function App() {
                     <div>
                       <dt>重试次数</dt>
                       <dd>{(run.retry_count ?? 0).toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt>并行工作线程</dt>
+                      <dd>{run.worker_count || 1} 个 · 执行中 {run.in_flight ?? 0} 项</dd>
                     </div>
                     <div className="run-status-grid__current">
                       <dt>当前对象</dt>
