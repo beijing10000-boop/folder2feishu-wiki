@@ -52,7 +52,7 @@ const emptySettings: AppSettings = {
   scopes,
   app_secret_configured: false,
   upload_qps: 4,
-  wiki_calls_per_minute: 90,
+  wiki_calls_per_minute: 100,
   daily_upload_budget: 0
 };
 

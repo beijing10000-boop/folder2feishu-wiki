@@ -47,6 +47,23 @@ def test_legacy_daily_budget_is_migrated_to_unlimited(tmp_path: Path) -> None:
     assert loaded.daily_upload_budget == 0
 
 
+def test_legacy_default_wiki_rate_is_upgraded_but_custom_rate_is_preserved(
+    tmp_path: Path,
+) -> None:
+    paths = RuntimePaths.discover(tmp_path / "state").ensure()
+    paths.settings.write_text(
+        json.dumps({"app_id": "cli_example", "wiki_calls_per_minute": 90}),
+        encoding="utf-8",
+    )
+    assert SettingsStore(paths).load().wiki_calls_per_minute == 100
+
+    paths.settings.write_text(
+        json.dumps({"app_id": "cli_example", "wiki_calls_per_minute": 70}),
+        encoding="utf-8",
+    )
+    assert SettingsStore(paths).load().wiki_calls_per_minute == 70
+
+
 def test_settings_reject_external_bind_and_missing_scope() -> None:
     with pytest.raises(ValueError, match="127.0.0.1"):
         PublicSettings(host="0.0.0.0").validate()

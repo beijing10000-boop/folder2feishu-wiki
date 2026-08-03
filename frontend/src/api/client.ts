@@ -109,7 +109,7 @@ const emptyQuota = {
   upload_calls_used: 0,
   upload_calls_limit: 0,
   wiki_calls_minute: 0,
-  wiki_calls_limit: 90
+  wiki_calls_limit: 100
 };
 
 const severity = (value: string): "ok" | "warning" | "error" | "info" => {
@@ -229,6 +229,8 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
     heartbeat_at: raw.heartbeat_at,
     elapsed_seconds: raw.elapsed_seconds,
     retry_count: raw.retry_count ?? 0,
+    worker_count: raw.worker_count ?? 0,
+    in_flight: raw.in_flight ?? 0,
     skipped: raw.skipped ?? 0,
     total: raw.total ?? progress.total ?? 0,
     completed: raw.completed ?? progress.completed ?? progress.done ?? 0,
@@ -271,7 +273,7 @@ export const api = {
       scopes: value.scopes ?? [],
       app_secret_configured: value.app_secret_configured ?? value.secret_configured ?? false,
       upload_qps: Number(value.upload_qps ?? 4),
-      wiki_calls_per_minute: Number(value.wiki_calls_per_minute ?? 90),
+      wiki_calls_per_minute: Number(value.wiki_calls_per_minute ?? 100),
       daily_upload_budget: Number(value.daily_upload_budget ?? 0)
     })),
   saveSettings: (value: AppSettingsInput) =>
@@ -284,7 +286,7 @@ export const api = {
       scopes: saved.scopes ?? [],
       app_secret_configured: saved.app_secret_configured ?? saved.secret_configured ?? false,
       upload_qps: Number(saved.upload_qps ?? 4),
-      wiki_calls_per_minute: Number(saved.wiki_calls_per_minute ?? 90),
+      wiki_calls_per_minute: Number(saved.wiki_calls_per_minute ?? 100),
       daily_upload_budget: Number(saved.daily_upload_budget ?? 0)
     })),
   getAuthStatus: () => request<AuthStatus>(`${API_ROOT}/auth/status`),

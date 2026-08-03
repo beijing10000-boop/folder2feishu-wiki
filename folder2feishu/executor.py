@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,10 +66,25 @@ class ReconcileSummary:
     conflicts: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ActionOutcome:
+    action: PlannedAction
+    item_bytes: int = 0
+    completed: bool = False
+    skipped: bool = False
+    failed: int = 0
+    conflicts: int = 0
+    quota_paused: bool = False
+    already_done: bool = False
+
+
 ProgressCallback = Callable[..., None]
 PROJECT_WRITE_LEASE = "migration"
 PROJECT_LEASE_TTL_SECONDS = 120
 PROJECT_LEASE_HEARTBEAT_SECONDS = 30.0
+DEFAULT_MIGRATION_WORKERS = 4
+MAX_QUEUED_ACTIONS_PER_WORKER = 2
+RUN_PROGRESS_PERSIST_SECONDS = 1.0
 
 
 def _parent_rel_path(rel_path: str) -> str | None:
@@ -172,7 +189,7 @@ class _ProjectLeaseHeartbeat:
 
 
 class MigrationExecutor:
-    """Execute the latest confirmed-safe plan one durable action at a time."""
+    """Execute a confirmed plan with bounded, dependency-safe concurrency."""
 
     def __init__(
         self,
@@ -180,11 +197,16 @@ class MigrationExecutor:
         drive: DriveService,
         wiki: WikiService,
         quota: DailyQuotaStore,
+        *,
+        max_workers: int = DEFAULT_MIGRATION_WORKERS,
     ) -> None:
+        if max_workers < 1 or max_workers > 8:
+            raise ValueError("migration worker count must be between 1 and 8")
         self.store = store
         self.drive = drive
         self.wiki = wiki
         self.quota = quota
+        self.max_workers = int(max_workers)
         self._folder_token_cache: dict[tuple[str, str], str] = {}
 
     def execute(
@@ -251,6 +273,7 @@ class MigrationExecutor:
                 started_at=durable_run.started_at or utc_now(),
                 finished_at=None,
                 error="",
+                summary={"workers": self.max_workers, "in_flight": 0},
             )
             self.store.append_audit(
                 project_id,
@@ -279,161 +302,154 @@ class MigrationExecutor:
         quota_paused = False
         total = run_summary["total"]
         after_order = -1
+        last_progress_persist = 0.0
 
         try:
-            while True:
-                actions = self.store.list_plan_actions_batch(
-                    project_id,
-                    plan_id,
-                    after_order=after_order,
-                    limit=200,
-                )
-                if not actions:
-                    break
-                items = self.store.get_inventory_items(
-                    action.inventory_item_id for action in actions if action.inventory_item_id
-                )
-                for action in actions:
-                    controller.checkpoint()
-                    lease.checkpoint()
-                    index = action.order_index
-                    after_order = max(after_order, index)
-                    item = items.get(action.inventory_item_id) if action.inventory_item_id else None
-                    item_bytes = int(item.size or 0) if item else 0
-                    if action.state == MigrationState.DONE:
-                        self._progress(progress, action, total, completed, failed, skipped)
-                        continue
-                    if action.action_type in {
-                        ActionType.CONFLICT,
-                        ActionType.MANUAL_ACTION,
-                    }:
-                        conflicts += 1
-                        continue
-
-                    self.store.update_job_run(
-                        run_id,
-                        current_stage=f"MIGRATING_{action.action_type.value}",
-                        current_item=action.source_rel_path or action.previous_rel_path,
-                        last_message=f"正在处理第 {index + 1:,} / {total:,} 项",
-                        heartbeat_at=utc_now(),
+            with ThreadPoolExecutor(
+                max_workers=self.max_workers,
+                thread_name_prefix="folder2feishu-migrate",
+            ) as workers:
+                while True:
+                    actions = self.store.list_plan_actions_batch(
+                        project_id,
+                        plan_id,
+                        after_order=after_order,
+                        limit=200,
                     )
-                    self._progress(
-                        progress,
-                        action,
-                        total,
-                        completed,
-                        failed,
-                        skipped,
-                        current=True,
-                    )
-                    try:
-                        self._execute_action(project, action, item, index=index)
-                    except DailyQuotaExceeded as exc:
-                        quota_paused = True
-                        self.store.update_plan_action(
-                            action.id,
-                            state=MigrationState.PAUSED,
-                            merge_details={
-                                "quota_reset_at": exc.reset_at.isoformat(),
-                                "quota_used": exc.used,
-                            },
-                        )
-                        self.store.append_audit(
-                            project_id,
-                            "migration.quota_paused",
-                            str(exc),
-                            level=AuditLevel.WARNING,
-                            job_run_id=run_id,
-                            planned_action_id=action.id,
-                            rel_path=action.source_rel_path,
-                            payload={"reset_at": exc.reset_at.isoformat()},
-                        )
+                    if not actions:
                         break
-                    except MigrationBlocked as exc:
-                        conflicts += 1
-                        self.store.update_plan_action(
-                            action.id,
-                            state=MigrationState.CONFLICT,
-                            reason=str(exc),
-                        )
-                        self.store.append_audit(
-                            project_id,
-                            "migration.conflict",
-                            str(exc),
-                            level=AuditLevel.ERROR,
-                            job_run_id=run_id,
-                            planned_action_id=action.id,
-                            rel_path=action.source_rel_path,
-                        )
-                    except WikiMoveTaskFailedError as exc:
-                        if exc.retryable:
-                            failed += 1
-                            state = MigrationState.RETRYABLE
-                            event_type = "migration.retryable"
-                        else:
-                            conflicts += 1
-                            state = MigrationState.MANUAL_ACTION
-                            event_type = "migration.manual_action"
-                        self.store.update_plan_action(
-                            action.id,
-                            state=state,
-                            reason=str(exc) if not exc.retryable else action.reason,
-                            merge_details={
-                                "last_error_type": type(exc).__name__,
-                                "last_error": str(exc),
-                            },
-                        )
-                        self.store.append_audit(
-                            project_id,
-                            event_type,
-                            str(exc),
-                            level=AuditLevel.ERROR,
-                            job_run_id=run_id,
-                            planned_action_id=action.id,
-                            rel_path=action.source_rel_path,
-                        )
-                    except (FeishuAmbiguousWriteError, FeishuError, OSError) as exc:
-                        failed += 1
-                        self.store.update_plan_action(
-                            action.id,
-                            state=MigrationState.RETRYABLE,
-                            merge_details={
-                                "last_error_type": type(exc).__name__,
-                                "last_error": str(exc),
-                            },
-                        )
-                        self.store.append_audit(
-                            project_id,
-                            "migration.retryable",
-                            str(exc),
-                            level=AuditLevel.ERROR,
-                            job_run_id=run_id,
-                            planned_action_id=action.id,
-                            rel_path=action.source_rel_path,
-                        )
-                    else:
-                        completed += 1
-                        bytes_completed += item_bytes
-                        if action.action_type in {
-                            ActionType.SKIP,
-                            ActionType.REPORT_MISSING,
-                        }:
-                            skipped += 1
-                    lease.checkpoint()
-                    self.store.update_job_run(
-                        run_id,
-                        completed_items=completed,
-                        failed_items=failed,
-                        skipped_items=skipped,
-                        bytes_completed=bytes_completed,
-                        current_item="",
-                        last_message=(f"已处理 {completed + failed + conflicts:,} / {total:,} 项"),
-                        heartbeat_at=utc_now(),
-                        summary={"conflicts": conflicts, "current_index": index},
+                    items = self.store.get_inventory_items(
+                        action.inventory_item_id for action in actions if action.inventory_item_id
                     )
-                    self._progress(progress, action, total, completed, failed, skipped)
-                if quota_paused:
-                    break
+                    cursor = 0
+                    while cursor < len(actions):
+                        controller.checkpoint()
+                        lease.checkpoint()
+                        group = self._parallel_action_group(actions, cursor)
+                        cursor += len(group)
+                        runnable: list[tuple[PlannedAction, InventoryItem | None]] = []
+                        for action in group:
+                            after_order = max(after_order, action.order_index)
+                            item = (
+                                items.get(action.inventory_item_id)
+                                if action.inventory_item_id
+                                else None
+                            )
+                            if action.state == MigrationState.DONE:
+                                self._progress(
+                                    progress,
+                                    action,
+                                    total,
+                                    completed,
+                                    failed,
+                                    skipped,
+                                )
+                                continue
+                            if action.action_type in {
+                                ActionType.CONFLICT,
+                                ActionType.MANUAL_ACTION,
+                            }:
+                                conflicts += 1
+                                continue
+                            runnable.append((action, item))
+
+                        if not runnable:
+                            continue
+
+                        first_action = runnable[0][0]
+                        last_index = max(action.order_index for action, _item in runnable)
+                        self.store.update_job_run(
+                            run_id,
+                            current_stage=f"MIGRATING_{first_action.action_type.value}",
+                            current_item=(
+                                first_action.source_rel_path or first_action.previous_rel_path
+                            ),
+                            last_message=(
+                                f"正在并行处理第 {first_action.order_index + 1:,}–"
+                                f"{last_index + 1:,} / {total:,} 项"
+                                if len(runnable) > 1
+                                else f"正在处理第 {first_action.order_index + 1:,} / {total:,} 项"
+                            ),
+                            heartbeat_at=utc_now(),
+                        )
+                        for action, _item in runnable:
+                            self._progress(
+                                progress,
+                                action,
+                                total,
+                                completed,
+                                failed,
+                                skipped,
+                                current=True,
+                            )
+
+                        futures = {
+                            workers.submit(
+                                self._execute_action_safely,
+                                project,
+                                run_id,
+                                action,
+                                item,
+                                controller,
+                            ): action
+                            for action, item in runnable
+                        }
+                        pending_count = len(futures)
+                        for future in as_completed(futures):
+                            outcome = future.result()
+                            pending_count -= 1
+                            if outcome.quota_paused:
+                                quota_paused = True
+                            if not outcome.already_done:
+                                completed += int(outcome.completed)
+                                skipped += int(outcome.skipped)
+                                failed += outcome.failed
+                                conflicts += outcome.conflicts
+                                if outcome.completed:
+                                    bytes_completed += outcome.item_bytes
+                            lease.checkpoint()
+                            now = time.monotonic()
+                            if (
+                                pending_count == 0
+                                or quota_paused
+                                or now - last_progress_persist >= RUN_PROGRESS_PERSIST_SECONDS
+                            ):
+                                self.store.update_job_run(
+                                    run_id,
+                                    completed_items=completed,
+                                    failed_items=failed,
+                                    skipped_items=skipped,
+                                    bytes_completed=bytes_completed,
+                                    current_item=(
+                                        ""
+                                        if pending_count == 0
+                                        else outcome.action.source_rel_path
+                                        or outcome.action.previous_rel_path
+                                    ),
+                                    last_message=(
+                                        f"已处理 {completed + failed + conflicts:,} / {total:,} 项"
+                                    ),
+                                    heartbeat_at=utc_now(),
+                                    summary={
+                                        "conflicts": conflicts,
+                                        "current_index": outcome.action.order_index,
+                                        "workers": self.max_workers,
+                                        "in_flight": pending_count,
+                                    },
+                                )
+                                last_progress_persist = now
+                            self._progress(
+                                progress,
+                                outcome.action,
+                                total,
+                                completed,
+                                failed,
+                                skipped,
+                            )
+                        if quota_paused:
+                            break
+                    if quota_paused:
+                        break
 
             lease.checkpoint()
             status = (
@@ -470,6 +486,8 @@ class MigrationExecutor:
                 summary={
                     "conflicts": conflicts,
                     "quota_paused": quota_paused,
+                    "workers": self.max_workers,
+                    "in_flight": 0,
                 },
                 bytes_completed=bytes_completed,
                 current_stage="COMPLETED" if status == RunStatus.COMPLETE else "NEEDS_ATTENTION",
@@ -536,6 +554,152 @@ class MigrationExecutor:
             interruptible.__exit__(None, None, None)
             lease.close()
 
+    def _parallel_action_group(
+        self,
+        actions: list[PlannedAction],
+        start: int,
+    ) -> list[PlannedAction]:
+        """Return a bounded group whose members have no parent dependency.
+
+        Folder actions are only concurrent at the same depth. Uploads are safe
+        after all folder/move actions because the planner orders action types.
+        Other actions stay serial until their dependency rules are explicitly
+        proven safe.
+        """
+
+        first = actions[start]
+        limit = self.max_workers * MAX_QUEUED_ACTIONS_PER_WORKER
+        if first.action_type == ActionType.CREATE_FOLDER:
+            first_depth = len(PurePosixPath(first.destination_rel_path).parts)
+
+            def compatible(candidate: PlannedAction) -> bool:
+                return (
+                    candidate.action_type == ActionType.CREATE_FOLDER
+                    and len(PurePosixPath(candidate.destination_rel_path).parts) == first_depth
+                )
+
+        elif first.action_type == ActionType.UPLOAD:
+
+            def compatible(candidate: PlannedAction) -> bool:
+                return candidate.action_type == ActionType.UPLOAD
+
+        else:
+            return [first]
+
+        end = start + 1
+        while end < len(actions) and end - start < limit and compatible(actions[end]):
+            end += 1
+        return actions[start:end]
+
+    def _execute_action_safely(
+        self,
+        project: Project,
+        run_id: str,
+        action: PlannedAction,
+        item: InventoryItem | None,
+        controller: JobControl,
+    ) -> _ActionOutcome:
+        """Execute one independent action and durably classify expected failures."""
+
+        api = getattr(self.drive, "api", None)
+        interruptible = (
+            api.interruptible(controller.wait)
+            if api is not None and hasattr(api, "interruptible")
+            else nullcontext()
+        )
+        item_bytes = int(item.size or 0) if item else 0
+        with interruptible:
+            controller.checkpoint()
+            try:
+                self._execute_action(project, action, item, index=action.order_index)
+            except DailyQuotaExceeded as exc:
+                self.store.update_plan_action(
+                    action.id,
+                    state=MigrationState.PAUSED,
+                    merge_details={
+                        "quota_reset_at": exc.reset_at.isoformat(),
+                        "quota_used": exc.used,
+                    },
+                )
+                self.store.append_audit(
+                    project.id,
+                    "migration.quota_paused",
+                    str(exc),
+                    level=AuditLevel.WARNING,
+                    job_run_id=run_id,
+                    planned_action_id=action.id,
+                    rel_path=action.source_rel_path,
+                    payload={"reset_at": exc.reset_at.isoformat()},
+                )
+                return _ActionOutcome(action, quota_paused=True)
+            except MigrationBlocked as exc:
+                self.store.update_plan_action(
+                    action.id,
+                    state=MigrationState.CONFLICT,
+                    reason=str(exc),
+                )
+                self.store.append_audit(
+                    project.id,
+                    "migration.conflict",
+                    str(exc),
+                    level=AuditLevel.ERROR,
+                    job_run_id=run_id,
+                    planned_action_id=action.id,
+                    rel_path=action.source_rel_path,
+                )
+                return _ActionOutcome(action, conflicts=1)
+            except WikiMoveTaskFailedError as exc:
+                state = MigrationState.RETRYABLE if exc.retryable else MigrationState.MANUAL_ACTION
+                event_type = "migration.retryable" if exc.retryable else "migration.manual_action"
+                self.store.update_plan_action(
+                    action.id,
+                    state=state,
+                    reason=str(exc) if not exc.retryable else action.reason,
+                    merge_details={
+                        "last_error_type": type(exc).__name__,
+                        "last_error": str(exc),
+                    },
+                )
+                self.store.append_audit(
+                    project.id,
+                    event_type,
+                    str(exc),
+                    level=AuditLevel.ERROR,
+                    job_run_id=run_id,
+                    planned_action_id=action.id,
+                    rel_path=action.source_rel_path,
+                )
+                return _ActionOutcome(
+                    action,
+                    failed=int(exc.retryable),
+                    conflicts=int(not exc.retryable),
+                )
+            except (FeishuAmbiguousWriteError, FeishuError, OSError) as exc:
+                self.store.update_plan_action(
+                    action.id,
+                    state=MigrationState.RETRYABLE,
+                    merge_details={
+                        "last_error_type": type(exc).__name__,
+                        "last_error": str(exc),
+                    },
+                )
+                self.store.append_audit(
+                    project.id,
+                    "migration.retryable",
+                    str(exc),
+                    level=AuditLevel.ERROR,
+                    job_run_id=run_id,
+                    planned_action_id=action.id,
+                    rel_path=action.source_rel_path,
+                )
+                return _ActionOutcome(action, failed=1)
+        return _ActionOutcome(
+            action,
+            item_bytes=item_bytes,
+            completed=True,
+            skipped=action.action_type in {ActionType.SKIP, ActionType.REPORT_MISSING},
+        )
+
     def _execute_action(
         self,
         project: Project,
@@ -555,27 +719,27 @@ class MigrationExecutor:
         if action.action_type == ActionType.UPLOAD:
             file_token, wiki_token = self._upload_file(project, action, item, index=index)
             destination_parent = self._destination_parent(project, item.rel_path)
-            self.store.upsert_remote_mapping(
-                project_id=project.id,
-                inventory_item_id=item.id,
-                item_kind=ItemKind.FILE,
-                last_source_rel_path=item.rel_path,
-                source_file_identity=item.file_identity,
-                source_sha256=item.sha256,
-                source_size=item.size,
-                wiki_space_id=project.target_space_id,
+            self.store.complete_plan_action_with_mapping(
+                action.id,
                 wiki_node_token=wiki_token,
                 object_token=file_token,
-                remote_parent_node_token=destination_parent,
-                remote_title=item.name,
-                remote_status=RemoteStatus.ACTIVE,
-                last_verified_at=utc_now(),
-                is_current=True,
-            )
-            self.store.update_plan_action(
-                action.id,
-                state=MigrationState.DONE,
-                object_token=file_token,
+                mapping_values={
+                    "project_id": project.id,
+                    "inventory_item_id": item.id,
+                    "item_kind": ItemKind.FILE,
+                    "last_source_rel_path": item.rel_path,
+                    "source_file_identity": item.file_identity,
+                    "source_sha256": item.sha256,
+                    "source_size": item.size,
+                    "wiki_space_id": project.target_space_id,
+                    "wiki_node_token": wiki_token,
+                    "object_token": file_token,
+                    "remote_parent_node_token": destination_parent,
+                    "remote_title": item.name,
+                    "remote_status": RemoteStatus.ACTIVE,
+                    "last_verified_at": utc_now(),
+                    "is_current": True,
+                },
             )
             return
         if action.action_type in {ActionType.MOVE, ActionType.RENAME}:
@@ -589,8 +753,7 @@ class MigrationExecutor:
     def _create_folder(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
         parent_token = self._destination_parent(project, item.rel_path)
         title = project.wrapper_name if item.rel_path == "" else item.name
-        current = self.store.get_plan_action(action.id)
-        details = current.details or {}
+        current, direct_create = self.store.prepare_folder_create_action(action.id)
         if current.wiki_node_token:
             # A prior process persisted the token before it stopped.  Resume
             # with a read-only reconciliation and never create a duplicate.
@@ -606,20 +769,15 @@ class MigrationExecutor:
                     "已记录的目录节点与预期不一致：" + ",".join(result.differences)
                 )
             node = result.node
-        elif details.get("folder_create_started"):
+        elif not direct_create:
             # The process may have stopped between POST and token persistence.
             # The existing reconciliation path is intentionally retained only
             # for this recovery case.
             node = self.wiki.ensure_docx_node(project.target_space_id, title, parent_token)
         else:
-            # Persist intent before the write.  A normal create now needs one
-            # POST instead of list + POST + get; a restart remains recoverable
+            # prepare_folder_create_action committed intent before this write.
+            # A normal create now needs one POST; a restart remains recoverable
             # through the branch above.
-            self.store.update_plan_action(
-                action.id,
-                state=MigrationState.VERIFYING,
-                merge_details={"folder_create_started": True},
-            )
             try:
                 node = self.wiki.create_docx_node(
                     project.target_space_id,
@@ -634,35 +792,30 @@ class MigrationExecutor:
                 )
         wiki_token = str(node["node_token"])
         object_token = str(node.get("obj_token") or "")
-        # Persist the returned tokens immediately.  The create response is the
-        # normal-path write evidence; full remote reconciliation is deferred
-        # to explicit audit/recovery instead of adding one GET per folder.
-        self.store.update_plan_action(
+        # Persist action evidence and mapping in one transaction. If that
+        # transaction fails, resume uses the pre-write intent to reconcile the
+        # remote result before any replacement POST.
+        self.store.complete_plan_action_with_mapping(
             action.id,
-            state=MigrationState.VERIFYING,
             wiki_node_token=wiki_token,
             object_token=object_token,
-        )
-        self.store.upsert_remote_mapping(
-            project_id=project.id,
-            inventory_item_id=item.id,
-            item_kind=ItemKind.FOLDER,
-            last_source_rel_path=item.rel_path,
-            source_file_identity=item.file_identity,
-            source_sha256=None,
-            source_size=None,
-            wiki_space_id=project.target_space_id,
-            wiki_node_token=wiki_token,
-            object_token=object_token,
-            remote_parent_node_token=parent_token,
-            remote_title=title,
-            remote_status=RemoteStatus.ACTIVE,
-            last_verified_at=utc_now(),
-            is_current=True,
-        )
-        self.store.update_plan_action(
-            action.id,
-            state=MigrationState.DONE,
+            mapping_values={
+                "project_id": project.id,
+                "inventory_item_id": item.id,
+                "item_kind": ItemKind.FOLDER,
+                "last_source_rel_path": item.rel_path,
+                "source_file_identity": item.file_identity,
+                "source_sha256": None,
+                "source_size": None,
+                "wiki_space_id": project.target_space_id,
+                "wiki_node_token": wiki_token,
+                "object_token": object_token,
+                "remote_parent_node_token": parent_token,
+                "remote_title": title,
+                "remote_status": RemoteStatus.ACTIVE,
+                "last_verified_at": utc_now(),
+                "is_current": True,
+            },
             merge_details={
                 "wiki_node_token": wiki_token,
                 "object_token": object_token,

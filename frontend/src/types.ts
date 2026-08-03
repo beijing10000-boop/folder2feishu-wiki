@@ -195,6 +195,8 @@ export interface RunSummary {
   heartbeat_at?: string;
   elapsed_seconds?: number;
   retry_count?: number;
+  worker_count?: number;
+  in_flight?: number;
   skipped?: number;
   total: number;
   completed: number;
