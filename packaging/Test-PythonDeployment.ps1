@@ -13,9 +13,9 @@ $PackagePath = (Resolve-Path $PackagePath).Path
 $testRoot = Join-Path $env:TEMP ("folder2feishu-python-test-" + [guid]::NewGuid().ToString("N"))
 $expanded = Join-Path $testRoot "expanded"
 $installed = Join-Path $testRoot "installed"
-$runtime = Join-Path $testRoot "runtime"
 $originalLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $testRoot "localappdata"
+$runtime = Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
 New-Item -ItemType Directory -Path $expanded -Force | Out-Null
 
 try {
@@ -43,7 +43,6 @@ try {
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Start-Folder2Feishu.ps1") `
         -NoBrowser `
-        -RuntimeDir $runtime `
         -TimeoutSeconds $TimeoutSeconds
     if ($LASTEXITCODE -ne 0) {
         throw "Python 版启动测试失败，退出码：$LASTEXITCODE"

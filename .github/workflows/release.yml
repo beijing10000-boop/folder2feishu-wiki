@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag，例如 v1.0.0-rc.1"
+        description: "Release tag，例如 v2.0.0-rc.1"
         required: true
         type: string
       prerelease:
@@ -30,7 +30,7 @@ jobs:
         shell: pwsh
         run: |
           if ("${{ inputs.tag }}" -notmatch '^v\d+\.\d+\.\d+(-rc\.\d+)?$') {
-            throw "Tag 必须符合 v1.0.0 或 v1.0.0-rc.1"
+            throw "Tag 必须符合 v2.0.0 或 v2.0.0-rc.1 这类语义化版本"
           }
 
       - name: Checkout

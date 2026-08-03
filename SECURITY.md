@@ -21,7 +21,7 @@ Folder2Feishu Wiki 是只在 Windows 本机运行的迁移工具。它会获得�
 在控制台执行“退出飞书授权”，并在飞书应用管理后台撤销用户授权。随后删除：
 
 ```text
-%LOCALAPPDATA%\Folder2FeishuWiki\credentials.bin
+%LOCALAPPDATA%\Folder2FeishuWikiNext\credentials.bin
 ```
 
 删除凭据不会删除迁移台账或飞书文件。重新授权后可以继续使用已有 token 映射。

@@ -71,7 +71,7 @@ class WikiService:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.api = api
-        self._sleep = sleeper
+        self._sleep = api.wait if sleeper is time.sleep else sleeper
         self._monotonic = monotonic
 
     def get_node(self, node_token: str, *, obj_type: str = "wiki") -> dict[str, Any]:
@@ -80,7 +80,7 @@ class WikiService:
         body = self.api.request(
             "GET",
             "/wiki/v2/spaces/get_node",
-            rate_group=RateLimitSet.WIKI,
+            rate_group=RateLimitSet.WIKI_READ,
             retry_mode=RetryMode.SAFE,
             params={"token": node_token, "obj_type": obj_type},
         )
@@ -106,7 +106,7 @@ class WikiService:
             body = self.api.request(
                 "GET",
                 f"/wiki/v2/spaces/{space_id}/nodes",
-                rate_group=RateLimitSet.WIKI,
+                rate_group=RateLimitSet.WIKI_READ,
                 retry_mode=RetryMode.SAFE,
                 params=params,
             )
@@ -149,7 +149,7 @@ class WikiService:
         body = self.api.request(
             "POST",
             f"/wiki/v2/spaces/{space_id}/nodes",
-            rate_group=RateLimitSet.WIKI,
+            rate_group=RateLimitSet.WIKI_CREATE,
             retry_mode=RetryMode.NEVER,
             json={
                 "obj_type": "docx",
@@ -192,7 +192,7 @@ class WikiService:
         body = self.api.request(
             "POST",
             f"/wiki/v2/spaces/{space_id}/nodes/move_docs_to_wiki",
-            rate_group=RateLimitSet.WIKI,
+            rate_group=RateLimitSet.WIKI_WRITE,
             retry_mode=RetryMode.RATE_LIMIT,
             json={
                 "parent_wiki_token": parent_wiki_token,
@@ -234,7 +234,7 @@ class WikiService:
             body = self.api.request(
                 "GET",
                 f"/wiki/v2/tasks/{task_id}",
-                rate_group=RateLimitSet.WIKI,
+                rate_group=RateLimitSet.WIKI_READ,
                 retry_mode=RetryMode.SAFE,
                 params={"task_type": "move"},
             )
@@ -353,7 +353,7 @@ class WikiService:
         body = self.api.request(
             "POST",
             f"/wiki/v2/spaces/{space_id}/nodes/{node_token}/move",
-            rate_group=RateLimitSet.WIKI,
+            rate_group=RateLimitSet.WIKI_WRITE,
             retry_mode=RetryMode.NEVER,
             json={
                 "target_parent_token": target_parent_token,
@@ -387,7 +387,7 @@ class WikiService:
         self.api.request(
             "POST",
             f"/wiki/v2/spaces/{space_id}/nodes/{node_token}/update_title",
-            rate_group=RateLimitSet.WIKI,
+            rate_group=RateLimitSet.WIKI_WRITE,
             retry_mode=RetryMode.NEVER,
             json={"title": title},
         )

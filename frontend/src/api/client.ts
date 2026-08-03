@@ -65,10 +65,26 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   headers.set("Accept", "application/json");
 
   let response: Response;
+  const controller = new AbortController();
+  const timeoutMs = SAFE_METHODS.has(method) ? 20_000 : 15_000;
+  const timeout = window.setTimeout(() => controller.abort("timeout"), timeoutMs);
+  const abortForwarder = () => controller.abort(init.signal?.reason);
+  init.signal?.addEventListener("abort", abortForwarder, { once: true });
   try {
-    response = await fetch(path, { ...init, headers, credentials: "same-origin" });
-  } catch {
+    response = await fetch(path, {
+      ...init,
+      headers,
+      signal: controller.signal,
+      credentials: "same-origin"
+    });
+  } catch (error) {
+    if (controller.signal.aborted && !init.signal?.aborted) {
+      throw new ApiError("本机服务响应超时，后台任务不会因此中断，请稍后刷新任务状态。");
+    }
     throw new ApiError("无法连接本机迁移服务，请确认 Folder2Feishu 正在运行。");
+  } finally {
+    window.clearTimeout(timeout);
+    init.signal?.removeEventListener("abort", abortForwarder);
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -125,7 +141,13 @@ const normalizeScan = (raw: Record<string, any>): ScanResult => {
   ) as ScanResult["status"];
   return {
     scan_id: raw.scan_id ?? raw.run_id ?? "",
+    run_id: raw.run_id,
     status,
+    scanned_items: raw.scanned_items ?? 0,
+    current_path: raw.current_path ?? "",
+    stage: raw.stage,
+    last_message: raw.last_message,
+    heartbeat_at: raw.heartbeat_at,
     summary: {
       files: counts.files ?? counts.file ?? 0,
       folders: counts.folders ?? counts.directories ?? counts.folder ?? 0,
@@ -185,7 +207,7 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
     rawStatus === "DONE"
       ? "COMPLETED"
       : rawStatus === "QUEUED"
-        ? "IDLE"
+        ? "RUNNING"
         : rawStatus === "QUOTA_PAUSED"
           ? "PAUSED"
           : rawStatus
@@ -194,12 +216,19 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
   return {
     id: raw.id ?? raw.run_id ?? "",
     project_id: raw.project_id ?? "",
+    kind: raw.kind,
+    stage: raw.stage,
     state,
     started_at: raw.started_at,
     finished_at: raw.finished_at,
     current_path:
       raw.current_path ??
       (typeof current === "string" ? current : current?.relative_path ?? current?.path),
+    last_message: raw.last_message,
+    heartbeat_at: raw.heartbeat_at,
+    elapsed_seconds: raw.elapsed_seconds,
+    retry_count: raw.retry_count ?? 0,
+    skipped: raw.skipped ?? 0,
     total: raw.total ?? progress.total ?? 0,
     completed: raw.completed ?? progress.completed ?? progress.done ?? 0,
     failed: raw.failed ?? progress.failed ?? raw.errors?.length ?? 0,
@@ -287,6 +316,10 @@ export const api = {
   createProject: (value: ProjectDraft) =>
     request<Project>(`${API_ROOT}/projects`, { method: "POST", ...body(value) }),
   getProject: (id: string) => request<Project>(`${API_ROOT}/projects/${id}`),
+  getProjectTasks: (id: string) =>
+    request<Record<string, any>[]>(`${API_ROOT}/projects/${id}/tasks`).then((items) =>
+      items.map(normalizeRun)
+    ),
   updateProject: (id: string, value: Partial<ProjectDraft>) =>
     request<Project>(`${API_ROOT}/projects/${id}`, { method: "PATCH", ...body(value) }),
   startScan: (id: string) =>
@@ -303,19 +336,44 @@ export const api = {
       checked_at: raw.checked_at ?? new Date().toISOString(),
       checks: [...(raw.checks ?? []), ...(raw.issues ?? [])].map(normalizeCheck)
     })),
-  getTree: (id: string) => request<TreeNode[]>(`${API_ROOT}/projects/${id}/tree`),
-  buildPlan: (id: string, confirm = false) =>
+  getTree: async (id: string, parent?: string) => {
+    const collected: TreeNode[] = [];
+    let offset = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const query = new URLSearchParams({ offset: String(offset), limit: "500" });
+      if (parent !== undefined) query.set("parent", parent);
+      const page = await request<{
+        items: TreeNode[];
+        has_more: boolean;
+      }>(`${API_ROOT}/projects/${id}/tree?${query}`);
+      collected.push(...page.items);
+      offset += page.items.length;
+      hasMore = page.has_more && page.items.length > 0;
+    }
+    return collected;
+  },
+  startPlan: (id: string) =>
     request<Record<string, any>>(`${API_ROOT}/projects/${id}/plan`, {
       method: "POST",
-      ...body({ confirmed: confirm })
+      ...body({ confirmed: false })
+    }).then(normalizeRun),
+  confirmPlan: (id: string) =>
+    request<Record<string, any>>(`${API_ROOT}/projects/${id}/plan`, {
+      method: "POST",
+      ...body({ confirmed: true })
     }).then(normalizePlan),
+  buildPlan: (id: string, confirm = false) =>
+    confirm
+      ? api.confirmPlan(id)
+      : api.startPlan(id),
   getPlan: (id: string) =>
     request<Record<string, any>>(`${API_ROOT}/projects/${id}/plan`).then(normalizePlan),
   startRun: (id: string) =>
-    request<{ run_id: string }>(`${API_ROOT}/projects/${id}/runs`, {
+    request<Record<string, any>>(`${API_ROOT}/projects/${id}/runs`, {
       method: "POST",
       ...body({})
-    }),
+    }).then(normalizeRun),
   getRun: (id: string) =>
     request<Record<string, any>>(`${API_ROOT}/runs/${id}`).then(normalizeRun),
   controlRun: (id: string, action: "pause" | "resume" | "stop" | "retry") =>
@@ -327,15 +385,10 @@ export const api = {
     request<Record<string, any>>(
       `${API_ROOT}/projects/${projectId}/reconcile`,
       { method: "POST", ...body({}) }
-    ).then((value) => ({
-      matched: value.matched ?? 0,
-      conflicts: Array.isArray(value.conflicts) ? value.conflicts.length : value.conflicts ?? 0,
-      missing: value.missing ?? value.missing_remote ?? 0,
-      checked_at: value.checked_at ?? new Date().toISOString()
-    })),
-  getAudit: (projectId: string) =>
-    request<{ events?: unknown[]; items?: RunItem[] }>(
-      `${API_ROOT}/projects/${projectId}/audit`
+    ).then(normalizeRun),
+  getAudit: (projectId: string, afterId?: number) =>
+    request<{ events?: unknown[]; items?: RunItem[]; next_after_id?: number }>(
+      `${API_ROOT}/projects/${projectId}/audit${afterId ? `?after_id=${afterId}` : ""}`
     ),
   exportAudit: (projectId: string, format: "csv" | "json") =>
     blobRequest(`${API_ROOT}/projects/${projectId}/audit?format=${format}`)

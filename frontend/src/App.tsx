@@ -417,24 +417,40 @@ function EmptyState({
   );
 }
 
-function TreeBranch({ node, level = 0 }: { node: TreeNode; level?: number }) {
-  const hasChildren = Boolean(node.children?.length);
+function TreeBranch({
+  node,
+  level = 0,
+  onExpand
+}: {
+  node: TreeNode;
+  level?: number;
+  onExpand?: (node: TreeNode) => void;
+}) {
+  const hasChildren = Boolean(node.child_count || node.children?.length);
   const Icon = node.kind === "folder" ? Folder : File;
   if (node.kind === "folder") {
     return (
-      <details className="tree-branch" open={level < 2}>
+      <details
+        className="tree-branch"
+        open={level === 0}
+        onToggle={(event) => {
+          if (event.currentTarget.open && hasChildren && node.children === undefined) {
+            onExpand?.(node);
+          }
+        }}
+      >
         <summary>
           <span className="tree-chevron">
             {hasChildren ? <ChevronRight size={14} aria-hidden="true" /> : <span />}
           </span>
           <Icon size={16} aria-hidden="true" />
           <span className="tree-name">{node.name}</span>
-          <small>{node.children?.length ?? 0} 项</small>
+          <small>{node.loading ? "读取中…" : `${node.child_count ?? node.children?.length ?? 0} 项`}</small>
         </summary>
         {hasChildren ? (
           <div className="tree-children">
             {node.children?.map((child) => (
-              <TreeBranch key={child.id} node={child} level={level + 1} />
+              <TreeBranch key={child.id} node={child} level={level + 1} onExpand={onExpand} />
             ))}
           </div>
         ) : null}
@@ -448,6 +464,20 @@ function TreeBranch({ node, level = 0 }: { node: TreeNode; level?: number }) {
       <span className="tree-name">{node.name}</span>
       <small>{formatBytes(node.size)}</small>
     </div>
+  );
+}
+
+function updateTreeNode(
+  nodes: TreeNode[],
+  relativePath: string,
+  changes: Partial<TreeNode>
+): TreeNode[] {
+  return nodes.map((node) =>
+    node.relative_path === relativePath
+      ? { ...node, ...changes }
+      : node.children
+        ? { ...node, children: updateTreeNode(node.children, relativePath, changes) }
+        : node
   );
 }
 
@@ -468,6 +498,7 @@ function App() {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [plan, setPlan] = useState<MigrationPlan>();
   const [run, setRun] = useState<RunSummary>();
+  const [backgroundTask, setBackgroundTask] = useState<RunSummary>();
   const [runItems, setRunItems] = useState<RunItem[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [validation, setValidation] = useState<ValidationState>(emptyValidation);
@@ -504,10 +535,21 @@ function App() {
         api.getTree(activeProject.id),
         api.getPlan(activeProject.id),
         api.getAudit(activeProject.id),
-        activeProject.last_run_id ? api.getRun(activeProject.last_run_id) : Promise.resolve(undefined)
+        activeProject.last_run_id ? api.getRun(activeProject.last_run_id) : Promise.resolve(undefined),
+        api.getProjectTasks
+          ? api.getProjectTasks(activeProject.id)
+          : Promise.resolve([] as RunSummary[])
       ]);
       if (calls[0].status === "fulfilled" && calls[0].value) setPreflight(calls[0].value);
-      if (calls[1].status === "fulfilled") setTree(calls[1].value);
+      if (calls[1].status === "fulfilled") {
+        const roots = calls[1].value;
+        if (roots.length === 1 && roots[0].kind === "folder" && roots[0].child_count) {
+          const children = await api.getTree(activeProject.id, roots[0].relative_path).catch(() => []);
+          setTree([{ ...roots[0], children }]);
+        } else {
+          setTree(roots);
+        }
+      }
       if (calls[2].status === "fulfilled") setPlan(calls[2].value);
       if (calls[3].status === "fulfilled") {
         const audit = calls[3].value as { events?: AuditEvent[]; items?: RunItem[] };
@@ -515,6 +557,16 @@ function App() {
         setRunItems(audit.items ?? []);
       }
       if (calls[4].status === "fulfilled" && calls[4].value) setRun(calls[4].value);
+      if (calls[5].status === "fulfilled") {
+        const active = calls[5].value.find(
+          (task) =>
+            task.state === "RUNNING" &&
+            (task.kind === "PLAN" || task.kind === "RECONCILIATION")
+        );
+        if (active) setBackgroundTask(active);
+        const latestMigration = calls[5].value.find((task) => task.kind === "MIGRATION");
+        if (latestMigration) setRun(latestMigration);
+      }
     },
     []
   );
@@ -623,15 +675,62 @@ function App() {
 
   useEffect(() => {
     if (!run || run.state !== "RUNNING") return;
-    const timer = window.setInterval(async () => {
+    let alive = true;
+    let timer = 0;
+    const poll = async () => {
       try {
-        setRun(await api.getRun(run.id));
+        const next = await api.getRun(run.id);
+        if (alive) setRun(next);
       } catch {
         // A transient polling failure should not interrupt the migration itself.
+      } finally {
+        if (alive) timer = window.setTimeout(poll, document.hidden ? 5_000 : 2_000);
       }
-    }, 4_000);
-    return () => window.clearInterval(timer);
+    };
+    void poll();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
   }, [run?.id, run?.state]);
+
+  useEffect(() => {
+    if (!backgroundTask || backgroundTask.state !== "RUNNING" || !project) return;
+    let alive = true;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await api.getRun(backgroundTask.id);
+        if (!alive) return;
+        setBackgroundTask(next);
+        if (next.state === "COMPLETED") {
+          if (next.kind === "PLAN") {
+            setPlan(await api.getPlan(project.id));
+            setStep("plan");
+            notify("差异计划已生成，尚未执行任何远端写入。", "info");
+          } else if (next.kind === "RECONCILIATION") {
+            const audit = await api.getAudit(project.id);
+            setEvents((audit.events ?? []) as AuditEvent[]);
+            setRunItems(audit.items ?? []);
+            notify("远端对账已完成。", "ok");
+          }
+          return;
+        }
+        if (["FAILED", "INTERRUPTED", "STOPPED"].includes(next.state)) {
+          notify(next.last_message || "后台任务未完成，可从当前状态重试。", "error");
+          return;
+        }
+      } catch {
+        // Polling reconnects automatically; the durable task remains in the backend.
+      }
+      if (alive) timer = window.setTimeout(poll, document.hidden ? 5_000 : 1_500);
+    };
+    void poll();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [backgroundTask?.id, backgroundTask?.state, project?.id, notify]);
 
   useEffect(() => {
     if (
@@ -675,6 +774,23 @@ function App() {
       window.clearInterval(timer);
     };
   }, [project?.id, scan?.status, notify]);
+
+  const loadTreeChildren = useCallback(
+    async (node: TreeNode) => {
+      if (!project || node.loading || node.children !== undefined) return;
+      setTree((current) => updateTreeNode(current, node.relative_path, { loading: true }));
+      try {
+        const children = await api.getTree(project.id, node.relative_path);
+        setTree((current) =>
+          updateTreeNode(current, node.relative_path, { loading: false, children })
+        );
+      } catch (error) {
+        setTree((current) => updateTreeNode(current, node.relative_path, { loading: false }));
+        showError(error);
+      }
+    },
+    [project?.id, showError]
+  );
 
   const markValidation = (
     key: ValidationKey,
@@ -986,9 +1102,13 @@ function App() {
     setBusy("plan");
     try {
       const result = await api.buildPlan(project.id);
-      setPlan(result);
-      setStep("plan");
-      notify("差异计划已生成，尚未执行任何远端写入。", "info");
+      if ("counts" in result) {
+        setPlan(result);
+        setStep("plan");
+      } else {
+        setBackgroundTask(result);
+        notify("差异计划任务已受理，页面会持续显示处理进度。", "info");
+      }
     } catch (error) {
       showError(error);
     } finally {
@@ -1001,6 +1121,7 @@ function App() {
     setBusy("confirm");
     try {
       const result = await api.buildPlan(project.id, true);
+      if (!("counts" in result)) throw new Error("确认计划返回了意外的任务状态");
       setPlan(result);
       notify("计划已确认。迁移仍需单独点击开始。");
     } catch (error) {
@@ -1015,9 +1136,11 @@ function App() {
     setBusy("run-start");
     try {
       const result = await api.startRun(project.id);
-      const currentRun = await api.getRun(result.run_id);
+      const runId = result.id || (result as RunSummary & { run_id?: string }).run_id;
+      if (!runId) throw new Error("服务未返回迁移任务 ID");
+      const currentRun = result.id ? result : await api.getRun(runId);
       setRun(currentRun);
-      setProject({ ...project, last_run_id: result.run_id });
+      setProject({ ...project, last_run_id: runId });
       setStep("run");
       notify("迁移已启动，可安全暂停或关闭页面。");
     } catch (error) {
@@ -1055,13 +1178,16 @@ function App() {
     setBusy("reconcile");
     try {
       const result = await api.reconcile(project.id);
-      notify(`远端对账完成：匹配 ${result.matched}，冲突 ${result.conflicts}。`, result.conflicts ? "warning" : "ok");
-      const audit = (await api.getAudit(project.id)) as {
-        events?: AuditEvent[];
-        items?: RunItem[];
-      };
-      setEvents(audit.events ?? []);
-      setRunItems(audit.items ?? []);
+      if ("id" in result) {
+        setBackgroundTask(result);
+        notify("远端对账任务已受理，完成后会自动刷新结果。", "info");
+      } else {
+        const legacy = result as unknown as { matched: number; conflicts: number };
+        notify(
+          `远端对账完成：匹配 ${legacy.matched ?? 0}，冲突 ${legacy.conflicts ?? 0}。`,
+          legacy.conflicts ? "warning" : "ok"
+        );
+      }
     } catch (error) {
       showError(error);
     } finally {
@@ -1314,6 +1440,44 @@ function App() {
             </div>
           )}
         </div>
+
+        {backgroundTask && backgroundTask.state === "RUNNING" ? (
+          <section className="task-progress" role="status" aria-live="polite">
+            <div className="task-progress__copy">
+              <LoaderCircle className="spin" size={18} aria-hidden="true" />
+              <div>
+                <strong>
+                  {backgroundTask.kind === "PLAN" ? "正在生成差异计划" : "正在执行远端对账"}
+                </strong>
+                <span>{backgroundTask.last_message || "后台任务已受理，正在准备执行…"}</span>
+                {backgroundTask.current_path ? <small>{backgroundTask.current_path}</small> : null}
+              </div>
+            </div>
+            <div className="task-progress__meter">
+              <div>
+                <span>
+                  {backgroundTask.completed.toLocaleString()} / {backgroundTask.total.toLocaleString()}
+                </span>
+                <strong>
+                  {backgroundTask.total
+                    ? Math.min(100, Math.round(backgroundTask.completed / backgroundTask.total * 100))
+                    : 0}%
+                </strong>
+              </div>
+              <progress value={backgroundTask.completed} max={Math.max(1, backgroundTask.total)} />
+            </div>
+            <button
+              type="button"
+              className="task-progress__stop"
+              onClick={async () => {
+                const stopped = await api.controlRun(backgroundTask.id, "stop");
+                setBackgroundTask(stopped);
+              }}
+            >
+              停止任务
+            </button>
+          </section>
+        ) : null}
 
         {step === "config" ? (
           <div className="view-stack config-workbench">
@@ -1831,6 +1995,14 @@ function App() {
                   进入权限与容量预检
                 </Button>
               </div>
+              {scanActive ? (
+                <div className="scan-live-progress" role="status" aria-live="polite">
+                  <progress />
+                  <strong>已盘点 {(scan?.scanned_items ?? 0).toLocaleString()} 项</strong>
+                  <span>{scan?.last_message || "正在读取本地目录和计算文件指纹…"}</span>
+                  {scan?.current_path ? <small title={scan.current_path}>{scan.current_path}</small> : null}
+                </div>
+              ) : null}
             </Panel>
 
             {scan ? (
@@ -1869,7 +2041,7 @@ function App() {
                     <div className="tree-view inventory-tree">
                       {(tree.length ? tree : scan.tree).length ? (
                         (tree.length ? tree : scan.tree).map((node) => (
-                          <TreeBranch key={node.id} node={node} />
+                          <TreeBranch key={node.id} node={node} onExpand={loadTreeChildren} />
                         ))
                       ) : (
                         <EmptyState
@@ -2030,7 +2202,7 @@ function App() {
                     />
                     <div className="tree-view">
                       {(tree.length ? tree : scan.tree).map((node) => (
-                        <TreeBranch key={node.id} node={node} />
+                        <TreeBranch key={node.id} node={node} onExpand={loadTreeChildren} />
                       ))}
                     </div>
                     <div className="tree-limit">

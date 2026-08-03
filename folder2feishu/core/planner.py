@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -123,20 +124,40 @@ class MigrationPlanner:
     # Short alias used by preflight/orchestrator callers.
     pending_upload_bytes = estimate_pending_upload_bytes
 
-    def build(self, project_id: str) -> PlanResult:
+    def build(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+        progress: Callable[[int, int, str], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> PlanResult:
         project = self.store.get_project(project_id)
         if not project.current_scan_id or not project.scan_complete:
             raise PlanBlockedError("a complete local scan is required before building a plan")
 
         scan_id = project.current_scan_id
         plan_id = uuid.uuid4().hex
-        run = self.store.create_job_run(
-            project_id,
-            RunType.PLAN,
-            status=RunStatus.RUNNING,
-            scan_id=scan_id,
-            plan_id=plan_id,
-        )
+        if run_id:
+            run = self.store.get_job_run(run_id)
+            if run.project_id != project_id or run.run_type != RunType.PLAN:
+                raise PlanBlockedError("plan task does not match the selected project")
+            self.store.update_job_run(
+                run.id,
+                status=RunStatus.RUNNING,
+                scan_id=scan_id,
+                plan_id=plan_id,
+                current_stage="PLANNING",
+                heartbeat_at=utc_now(),
+            )
+        else:
+            run = self.store.create_job_run(
+                project_id,
+                RunType.PLAN,
+                status=RunStatus.RUNNING,
+                scan_id=scan_id,
+                plan_id=plan_id,
+            )
         items = self.store.list_inventory(project_id, present=True)
         mappings = self.store.list_remote_mappings(project_id, current_only=True)
         issues = self.store.list_issues(project_id, scan_id=scan_id)
@@ -154,7 +175,12 @@ class MigrationPlanner:
         matched_mapping_ids = {mapping.id for mapping in matches.values() if mapping is not None}
         actions: list[dict[str, Any]] = []
 
-        for item in items:
+        total_source_items = len(items) + len(mappings)
+        for item_index, item in enumerate(items, start=1):
+            if cancel and cancel():
+                raise PlanBlockedError("plan generation was cancelled")
+            if progress and (item_index == 1 or item_index % 500 == 0):
+                progress(item_index, total_source_items, item.rel_path)
             mapping = matches.get(item.id)
             item_issues = issues_by_path.get(item.rel_path, [])
             if item.id in ambiguity:
@@ -233,7 +259,12 @@ class MigrationPlanner:
 
         # A current mapping that did not match this scan is never deleted or
         # moved automatically.  It becomes an explicit missing-source report.
-        for mapping in mappings:
+        for mapping_index, mapping in enumerate(mappings, start=1):
+            current_index = len(items) + mapping_index
+            if cancel and cancel():
+                raise PlanBlockedError("plan generation was cancelled")
+            if progress and current_index % 500 == 0:
+                progress(current_index, total_source_items, mapping.last_source_rel_path)
             if mapping.id in matched_mapping_ids:
                 continue
             action_type = (
@@ -268,13 +299,15 @@ class MigrationPlanner:
         actions.sort(key=self._sort_key)
         for index, action in enumerate(actions):
             action["order_index"] = index
-        saved = self.store.save_plan(project_id, plan_id, actions)
-        counts = Counter(action.action_type.value for action in saved)
+        if progress:
+            progress(total_source_items, total_source_items, "正在持久化差异计划")
+        saved_count = self.store.save_plan_bulk(project_id, plan_id, actions)
+        counts = Counter(action["action_type"].value for action in actions)
         upload_item_ids = {
-            action.inventory_item_id
-            for action in saved
-            if action.inventory_item_id
-            and action.action_type in {ActionType.UPLOAD, ActionType.VERSION_UPDATE}
+            action["inventory_item_id"]
+            for action in actions
+            if action.get("inventory_item_id")
+            and action["action_type"] in {ActionType.UPLOAD, ActionType.VERSION_UPDATE}
         }
         estimated_calls = sum(
             _upload_calls(item.size) for item in items if item.id in upload_item_ids
@@ -297,8 +330,8 @@ class MigrationPlanner:
         self.store.update_job_run(
             run.id,
             status=RunStatus.COMPLETE,
-            total_items=len(saved),
-            completed_items=len(saved),
+            total_items=saved_count,
+            completed_items=saved_count,
             skipped_items=counts[ActionType.SKIP.value],
             summary=summary,
             finished_at=utc_now(),
@@ -316,7 +349,7 @@ class MigrationPlanner:
             plan_id=plan_id,
             run_id=run.id,
             scan_id=scan_id,
-            total_actions=len(saved),
+            total_actions=saved_count,
             counts=dict(counts),
             estimated_upload_calls=estimated_calls,
             estimated_minimum_days=minimum_days,

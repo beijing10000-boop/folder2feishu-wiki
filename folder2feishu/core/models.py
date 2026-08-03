@@ -38,7 +38,7 @@ from .enums import (
     UploadStatus,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> datetime:
@@ -110,6 +110,14 @@ class InventoryItem(Base):
         Index("ix_inventory_project_identity", "project_id", "file_identity"),
         Index("ix_inventory_project_hash", "project_id", "sha256"),
         Index("ix_inventory_project_present_kind", "project_id", "present", "kind"),
+        Index(
+            "ix_inventory_project_parent_present",
+            "project_id",
+            "parent_rel_path",
+            "present",
+            "kind",
+            "name",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -225,6 +233,8 @@ class PlannedAction(Base):
     __table_args__ = (
         Index("ix_actions_project_plan", "project_id", "plan_id", "order_index"),
         Index("ix_actions_plan_type", "plan_id", "action_type"),
+        Index("ix_actions_plan_state_order", "project_id", "plan_id", "state", "order_index"),
+        Index("ix_actions_project_created", "project_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -308,7 +318,10 @@ class UploadSession(Base):
 
 class JobRun(Base):
     __tablename__ = "job_runs"
-    __table_args__ = (Index("ix_job_runs_project_created", "project_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_job_runs_project_created", "project_id", "created_at"),
+        Index("ix_job_runs_status_heartbeat", "status", "heartbeat_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(
@@ -326,12 +339,21 @@ class JobRun(Base):
     completed_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_stage: Mapped[str] = mapped_column(String(80), nullable=False, default="QUEUED")
+    current_item: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    last_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    bytes_total: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_completed: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

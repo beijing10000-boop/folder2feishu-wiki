@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -252,9 +253,9 @@ class InventoryScanner:
         self,
         store: CoreStore,
         *,
-        batch_size: int = 500,
+        batch_size: int = 1_000,
         progress_interval: int = 100,
-        hash_workers: int = 4,
+        hash_workers: int = 8,
         hash_queue_size: int | None = None,
     ):
         if batch_size < 1:
@@ -265,7 +266,7 @@ class InventoryScanner:
         self.batch_size = batch_size
         self.progress_interval = max(1, progress_interval)
         self.hash_workers = hash_workers
-        self.hash_queue_size = max(hash_workers, hash_queue_size or hash_workers * 2)
+        self.hash_queue_size = max(hash_workers, hash_queue_size or hash_workers * 8)
 
     def _digest_caches(
         self,
@@ -336,6 +337,7 @@ class InventoryScanner:
         project_id: str,
         source_root: str | Path | None = None,
         *,
+        run_id: str | None = None,
         cancel: Callable[[], bool] | Any | None = None,
         progress: Callable[[ScanProgress], None] | None = None,
     ) -> ScanResult:
@@ -343,12 +345,28 @@ class InventoryScanner:
         root = Path(source_root or project.source_root).expanduser().absolute()
         digest_by_path, digest_by_identity = self._digest_caches(project_id)
         scan_id = uuid.uuid4().hex
-        run = self.store.create_job_run(
-            project_id,
-            RunType.SCAN,
-            status=RunStatus.RUNNING,
-            scan_id=scan_id,
-        )
+        if run_id:
+            run = self.store.get_job_run(run_id)
+            self.store.update_job_run(
+                run.id,
+                status=RunStatus.RUNNING,
+                scan_id=scan_id,
+                current_stage="SCANNING",
+                current_item="",
+                last_message="正在读取本地目录并计算文件指纹",
+                heartbeat_at=utc_now(),
+                started_at=run.started_at or utc_now(),
+                finished_at=None,
+                error="",
+            )
+        else:
+            run = self.store.create_job_run(
+                project_id,
+                RunType.SCAN,
+                status=RunStatus.RUNNING,
+                scan_id=scan_id,
+                current_stage="SCANNING",
+            )
         self.store.update_project(
             project_id,
             source_root=str(root),
@@ -368,6 +386,7 @@ class InventoryScanner:
         item_batch: list[dict[str, Any]] = []
         issue_batch: list[dict[str, Any]] = []
         cancelled = False
+        unexpected_error: Exception | None = None
         hash_stats = {
             "hashes_computed": 0,
             "hashes_reused": 0,
@@ -377,6 +396,7 @@ class InventoryScanner:
             thread_name_prefix="folder2feishu-hash",
         )
         pending_hashes: deque[tuple[_FileCandidate, Future[str]]] = deque()
+        last_persist_at = time.monotonic()
 
         def flush() -> None:
             if item_batch:
@@ -411,6 +431,7 @@ class InventoryScanner:
                 flush()
 
         def emit_progress(current: str, *, force: bool = False) -> None:
+            nonlocal last_persist_at
             scanned = counts["folders"] + counts["files"]
             if progress and (force or scanned % self.progress_interval == 0):
                 progress(
@@ -424,6 +445,29 @@ class InventoryScanner:
                         current_rel_path=current,
                     )
                 )
+            now_monotonic = time.monotonic()
+            should_persist = (
+                force
+                or scanned % max(1_000, self.progress_interval) == 0
+                or now_monotonic - last_persist_at >= 1.0
+            )
+            if should_persist:
+                self.store.update_job_run(
+                    run.id,
+                    total_items=scanned,
+                    completed_items=scanned,
+                    bytes_completed=counts["bytes"],
+                    current_stage="SCANNING",
+                    current_item=current,
+                    last_message=f"已盘点 {scanned:,} 项",
+                    heartbeat_at=utc_now(),
+                    summary={
+                        "folders": counts["folders"],
+                        "files": counts["files"],
+                        "issues": counts["issues"],
+                    },
+                )
+                last_persist_at = now_monotonic
 
         def check_cancel() -> None:
             if _is_cancelled(cancel):
@@ -733,11 +777,20 @@ class InventoryScanner:
                 "",
                 operational=True,
             )
+        except Exception as exc:
+            unexpected_error = exc
+            add_issue(
+                IssueCode.ENUMERATION_ERROR,
+                IssueSeverity.BLOCKING,
+                f"unexpected scan failure: {type(exc).__name__}: {exc}",
+                "",
+                operational=True,
+            )
         finally:
             flush()
             hash_executor.shutdown(wait=True, cancel_futures=True)
 
-        complete = not cancelled and counts["operational_errors"] == 0
+        complete = not cancelled and unexpected_error is None and counts["operational_errors"] == 0
         project_status = ProjectStatus.SCANNED if complete else ProjectStatus.BLOCKED
         summary = {
             **counts,
@@ -746,6 +799,7 @@ class InventoryScanner:
             "cancelled": cancelled,
             "source_root": str(root),
         }
+        emit_progress("", force=True)
         self.store.update_project(
             project_id,
             status=project_status,
@@ -765,6 +819,15 @@ class InventoryScanner:
             completed_items=counts["folders"] + counts["files"],
             failed_items=counts["operational_errors"],
             summary=summary,
+            error=(
+                ""
+                if unexpected_error is None
+                else f"{type(unexpected_error).__name__}: {unexpected_error}"
+            ),
+            current_stage="COMPLETED" if complete else "FAILED",
+            current_item="",
+            last_message="盘点完成" if complete else "盘点未完成，请查看错误详情",
+            heartbeat_at=utc_now(),
             finished_at=utc_now(),
         )
         self.store.append_audit(
@@ -779,7 +842,8 @@ class InventoryScanner:
             job_run_id=run.id,
             payload=summary,
         )
-        emit_progress("", force=True)
+        if unexpected_error is not None:
+            raise unexpected_error
         return ScanResult(
             project_id=project_id,
             scan_id=scan_id,

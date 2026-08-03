@@ -13,6 +13,8 @@ from folder2feishu.core import (
     LeaseBusyError,
     MigrationState,
     RemoteStatus,
+    RunStatus,
+    RunType,
     UploadStatus,
 )
 
@@ -156,5 +158,25 @@ def test_job_lease_is_single_writer_and_expired_lease_can_be_taken(tmp_path):
         assert replacement.owner_id == "worker-b"
         assert not store.release_lease(project.id, "migration", "worker-a")
         assert store.release_lease(project.id, "migration", "worker-b")
+    finally:
+        store.close()
+
+
+def test_orphaned_background_job_is_marked_recoverable_after_restart(tmp_path):
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="orphan", source_root=tmp_path)
+        run = store.create_job_run(
+            project.id,
+            RunType.MIGRATION,
+            status=RunStatus.RUNNING,
+            current_stage="DATA_MIGRATION",
+        )
+        recovered = store.interrupt_orphaned_job_runs(stale_after_seconds=0)
+        durable = store.get_job_run(run.id)
+        assert recovered == 1
+        assert durable.status == RunStatus.INTERRUPTED
+        assert durable.current_stage == "INTERRUPTED"
+        assert "断点" in durable.last_message
     finally:
         store.close()

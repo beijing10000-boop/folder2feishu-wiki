@@ -97,14 +97,12 @@ class FakeWiki:
         self.moves_to_wiki = 0
         self.reconcile_calls = 0
 
-    def ensure_docx_node(self, space_id: str, title: str, parent_node_token: str) -> dict[str, str]:
-        for node in self.nodes.values():
-            if (
-                node["space_id"] == space_id
-                and node["title"] == title
-                and node["parent_node_token"] == parent_node_token
-            ):
-                return node
+    def create_docx_node(
+        self,
+        space_id: str,
+        title: str,
+        parent_node_token: str,
+    ) -> dict[str, str]:
         self.created += 1
         token = f"wiki-folder-{self.created}"
         node = {
@@ -116,6 +114,16 @@ class FakeWiki:
         }
         self.nodes[token] = node
         return node
+
+    def ensure_docx_node(self, space_id: str, title: str, parent_node_token: str) -> dict[str, str]:
+        for node in self.nodes.values():
+            if (
+                node["space_id"] == space_id
+                and node["title"] == title
+                and node["parent_node_token"] == parent_node_token
+            ):
+                return node
+        return self.create_docx_node(space_id, title, parent_node_token)
 
     def move_file_to_wiki(
         self,
@@ -314,6 +322,9 @@ def test_zero_byte_file_is_reported_and_skipped_without_remote_write(
         first = executor.execute(project.id)
         assert first.failed == first.conflicts == 0
         assert drive.uploads == 0
+        # A successful first-time folder create trusts the returned token and
+        # does not spend an additional Wiki read on immediate reconciliation.
+        assert wiki.reconcile_calls == 0
         assert [
             mapping.last_source_rel_path for mapping in store.list_remote_mappings(project.id)
         ] == [""]
@@ -332,6 +343,57 @@ def test_zero_byte_file_is_reported_and_skipped_without_remote_write(
         executor.execute(project.id)
         assert drive.uploads == 0
 
+    finally:
+        store.close()
+
+
+def test_folder_create_resume_reconciles_started_write_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "folder-resume"
+    source.mkdir()
+    store = CoreStore(tmp_path / "folder-resume.sqlite3")
+    try:
+        project = store.create_project(
+            name="folder-resume",
+            source_root=source,
+            target_wiki_url="https://example.feishu.cn/wiki/target-parent",
+            target_space_id="space-1",
+            target_parent_node_token="target-parent",
+            identity_key="fixed-user",
+        )
+        InventoryScanner(store).scan(project.id)
+        MigrationPlanner(store).build(project.id)
+        _confirm(store, project.id)
+        action = next(
+            candidate
+            for candidate in store.list_plan_actions(project.id)
+            if candidate.action_type == ActionType.CREATE_FOLDER
+        )
+        store.update_plan_action(
+            action.id,
+            state=MigrationState.VERIFYING,
+            merge_details={"folder_create_started": True},
+        )
+
+        drive = FakeDrive()
+        wiki = FakeWiki(drive)
+        existing = wiki.create_docx_node(
+            "space-1",
+            project.wrapper_name,
+            "target-parent",
+        )
+        result = MigrationExecutor(
+            store,
+            drive,  # type: ignore[arg-type]
+            wiki,  # type: ignore[arg-type]
+            DailyQuotaStore(tmp_path / "folder-resume-quota.json"),
+        ).execute(project.id)
+
+        assert result.failed == result.conflicts == 0
+        assert wiki.created == 1
+        persisted = store.get_plan_action(action.id)
+        assert persisted.wiki_node_token == existing["node_token"]
     finally:
         store.close()
 

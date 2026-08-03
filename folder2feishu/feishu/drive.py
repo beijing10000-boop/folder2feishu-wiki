@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import mimetypes
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -130,6 +131,16 @@ class DriveService:
     ) -> None:
         self.api = api
         self._now = now
+        # Staging folders are stable for the lifetime of a migration project.
+        # Resolving the same root/project/shard hierarchy for every file used to
+        # add four or more Drive reads before each upload.  Keep a process-local
+        # cache and serialize the rare cache miss so concurrent upload workers
+        # cannot create duplicate staging folders.
+        self._staging_lock = threading.RLock()
+        self._root_folder_token = ""
+        self._staging_root_token = ""
+        self._staging_project_tokens: dict[str, str] = {}
+        self._staging_shard_tokens: dict[tuple[str, int], str] = {}
 
     def get_root_folder_token(self) -> str:
         body = self.api.request(
@@ -309,15 +320,54 @@ class DriveService:
             raise
 
     def ensure_staging(self, project_id: str, *, shard_index: int = 0) -> StagingLocation:
-        root_folder = self.get_root_folder_token()
-        staging_root = self.ensure_folder(root_folder, STAGING_ROOT_NAME)
-        project_folder = self.ensure_folder(staging_root, staging_project_folder_name(project_id))
-        shard_folder = self.ensure_folder(project_folder, staging_shard_folder_name(shard_index))
-        return StagingLocation(
-            root_token=staging_root,
-            project_token=project_folder,
-            shard_token=shard_folder,
-        )
+        if not project_id:
+            raise ValueError("project_id is required")
+        if shard_index < 0:
+            raise ValueError("shard_index must not be negative")
+        cache_key = (project_id, shard_index)
+        with self._staging_lock:
+            cached_shard = self._staging_shard_tokens.get(cache_key)
+            cached_project = self._staging_project_tokens.get(project_id)
+            if cached_shard and cached_project and self._staging_root_token:
+                return StagingLocation(
+                    root_token=self._staging_root_token,
+                    project_token=cached_project,
+                    shard_token=cached_shard,
+                )
+
+            if not self._root_folder_token:
+                self._root_folder_token = self.get_root_folder_token()
+            if not self._staging_root_token:
+                self._staging_root_token = self.ensure_folder(
+                    self._root_folder_token,
+                    STAGING_ROOT_NAME,
+                )
+            project_folder = cached_project
+            if not project_folder:
+                project_folder = self.ensure_folder(
+                    self._staging_root_token,
+                    staging_project_folder_name(project_id),
+                )
+                self._staging_project_tokens[project_id] = project_folder
+            shard_folder = self.ensure_folder(
+                project_folder,
+                staging_shard_folder_name(shard_index),
+            )
+            self._staging_shard_tokens[cache_key] = shard_folder
+            return StagingLocation(
+                root_token=self._staging_root_token,
+                project_token=project_folder,
+                shard_token=shard_folder,
+            )
+
+    def clear_staging_cache(self) -> None:
+        """Forget cached folder tokens after an operator repairs Drive state."""
+
+        with self._staging_lock:
+            self._root_folder_token = ""
+            self._staging_root_token = ""
+            self._staging_project_tokens.clear()
+            self._staging_shard_tokens.clear()
 
     def rename_file(self, file_token: str, new_title: str, *, object_type: str = "file") -> str:
         if not file_token.strip():

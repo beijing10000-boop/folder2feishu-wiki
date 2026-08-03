@@ -163,3 +163,32 @@ def test_rate_limit_groups_are_independent():
     api.request("GET", "/drive", rate_group=RateLimitSet.DRIVE_UPLOAD)
     api.request("GET", "/wiki", rate_group=RateLimitSet.WIKI)
     assert (drive.calls, wiki.calls, general.calls) == (1, 1, 0)
+
+
+def test_wiki_endpoint_rate_limit_groups_are_independent():
+    class Counter:
+        def __init__(self):
+            self.calls = 0
+
+        def acquire(self):
+            self.calls += 1
+
+    create, read, write = Counter(), Counter(), Counter()
+    limits = RateLimitSet(
+        wiki_create=create,
+        wiki_read=read,
+        wiki_write=write,
+    )
+    api = FeishuAPIClient(
+        lambda: "u-fixed",
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"code": 0}))
+        ),
+        rate_limits=limits,
+    )
+
+    api.request("POST", "/wiki/create", rate_group=RateLimitSet.WIKI_CREATE)
+    api.request("GET", "/wiki/read", rate_group=RateLimitSet.WIKI_READ)
+    api.request("POST", "/wiki/write", rate_group=RateLimitSet.WIKI_WRITE)
+
+    assert (create.calls, read.calls, write.calls) == (1, 1, 1)

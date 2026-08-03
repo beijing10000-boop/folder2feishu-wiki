@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Callable
@@ -7,6 +8,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+from .observability import stage_var, task_id_var
+
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -71,6 +76,49 @@ class JobControl:
         if self._stop.is_set():
             raise JobStopped("任务已停止")
 
+    def wait(self, seconds: float, *, interval: float = 0.25) -> None:
+        """Interruptible replacement for time.sleep used by retries and polling."""
+
+        deadline = max(0.0, float(seconds))
+        waited = 0.0
+        while waited < deadline:
+            self.checkpoint(timeout=min(interval, deadline - waited))
+            waited += min(interval, deadline - waited)
+
+
+class HeartbeatPump:
+    """Persist a task heartbeat even while its worker is inside a network call."""
+
+    def __init__(self, callback: Callable[[], Any], *, interval_seconds: float = 5.0) -> None:
+        self._callback = callback
+        self._interval = max(1.0, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> HeartbeatPump:
+        self._callback()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="folder2feishu-task-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._interval + 1.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._callback()
+            except Exception:
+                # The main worker remains authoritative. Its next durable update
+                # will surface a database failure without killing this process.
+                return
+
 
 Worker = Callable[[JobControl, Callable[..., None]], dict[str, Any] | None]
 
@@ -107,7 +155,12 @@ class BackgroundJobManager:
                 raise RuntimeError("该项目已有任务正在运行")
             run_id = run_id or uuid.uuid4().hex
             if run_id in self._jobs:
-                raise RuntimeError("任务 ID 已存在")
+                if self._jobs[run_id].status in {"done", "failed", "stopped"}:
+                    self._jobs.pop(run_id, None)
+                    self._controls.pop(run_id, None)
+                    self._futures.pop(run_id, None)
+                else:
+                    raise RuntimeError("任务 ID 已存在")
             snapshot = JobSnapshot(run_id=run_id, project_id=project_id, kind=kind)
             control = JobControl()
             self._jobs[run_id] = snapshot
@@ -122,12 +175,20 @@ class BackgroundJobManager:
             return snapshot
 
     def _execute(self, run_id: str, worker: Worker, control: JobControl) -> None:
+        task_token = task_id_var.set(run_id)
+        stage_token = stage_var.set(self._jobs[run_id].kind.upper())
         self._update(run_id, status="running", started_at=utc_now())
+        LOGGER.info("后台任务开始")
         try:
             details = worker(control, lambda **changes: self._update(run_id, **changes))
         except JobStopped:
+            LOGGER.info("后台任务已停止")
             self._update(run_id, status="stopped", finished_at=utc_now())
         except Exception as exc:
+            LOGGER.exception(
+                "后台任务失败",
+                extra={"error_type": type(exc).__name__},
+            )
             self._update(
                 run_id,
                 status="failed",
@@ -135,12 +196,16 @@ class BackgroundJobManager:
                 finished_at=utc_now(),
             )
         else:
+            LOGGER.info("后台任务完成")
             self._update(
                 run_id,
                 status="done",
                 details=details or {},
                 finished_at=utc_now(),
             )
+        finally:
+            stage_var.reset(stage_token)
+            task_id_var.reset(task_token)
 
     def _update(self, run_id: str, **changes: Any) -> None:
         with self._lock:

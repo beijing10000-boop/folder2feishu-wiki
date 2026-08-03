@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -40,7 +42,8 @@ from .core import (
 )
 from .core.models import utc_now
 from .feishu import FeishuError
-from .job_control import JobSnapshot
+from .job_control import HeartbeatPump, JobSnapshot
+from .observability import METRICS, request_id_var
 from .quota import DailyQuotaStore
 from .runtime import bundled_path
 from .settings import PublicSettings
@@ -126,22 +129,32 @@ def _issue_payload(issue: Any) -> dict[str, Any]:
 
 def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, Any]:
     project = services.store.get_project(project_id)
-    latest = services.jobs.latest_for_project(project_id)
+    latest_run = next(
+        (
+            run
+            for run in services.store.list_job_runs(project_id, limit=20)
+            if run.run_type == RunType.SCAN
+        ),
+        None,
+    )
     issues = services.store.list_issues(project_id, scan_id=project.current_scan_id)
     summary = services.inventory_summary(project_id)
-    status = (
-        latest.status.upper()
-        if latest and latest.kind == "scan"
-        else "COMPLETED"
-        if project.scan_complete
-        else "IDLE"
-    )
+    durable_status = latest_run.status.value if latest_run else "IDLE"
+    status = {
+        "QUEUED": "PENDING",
+        "RUNNING": "RUNNING",
+        "PAUSED": "PAUSED",
+        "INTERRUPTED": "INTERRUPTED",
+        "COMPLETE": "COMPLETED",
+        "FAILED": "FAILED",
+        "CANCELLED": "STOPPED",
+    }.get(durable_status, durable_status)
     return {
-        "scan_id": project.current_scan_id or "",
-        "run_id": latest.run_id if latest and latest.kind == "scan" else None,
+        "scan_id": project.current_scan_id or (latest_run.scan_id if latest_run else "") or "",
+        "run_id": latest_run.id if latest_run else None,
         "status": status,
         "complete": project.scan_complete,
-        "cancel_requested": bool(latest and latest.kind == "scan" and latest.status == "stopped"),
+        "cancel_requested": bool(latest_run and latest_run.cancel_requested),
         "summary": summary,
         "counts": summary,
         "checks": [_issue_payload(issue) for issue in issues],
@@ -150,10 +163,19 @@ def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, A
         # thousands of nodes here made every progress poll and application
         # restore wait for the largest payload in the project.
         "tree": [],
-        "scanned_items": (int(latest.details.get("scanned_items", 0)) if latest else 0),
-        "current_path": latest.current_item if latest else "",
-        "started_at": latest.started_at.isoformat() if latest and latest.started_at else None,
-        "finished_at": latest.finished_at.isoformat() if latest and latest.finished_at else None,
+        "scanned_items": latest_run.completed_items if latest_run else 0,
+        "current_path": latest_run.current_item if latest_run else "",
+        "stage": latest_run.current_stage if latest_run else "IDLE",
+        "last_message": latest_run.last_message if latest_run else "",
+        "heartbeat_at": (
+            latest_run.heartbeat_at.isoformat() if latest_run and latest_run.heartbeat_at else None
+        ),
+        "started_at": latest_run.started_at.isoformat()
+        if latest_run and latest_run.started_at
+        else None,
+        "finished_at": latest_run.finished_at.isoformat()
+        if latest_run and latest_run.finished_at
+        else None,
     }
 
 
@@ -163,8 +185,6 @@ def _job_payload(
     snapshot: JobSnapshot | None = None,
 ) -> dict[str, Any]:
     run = services.store.get_job_run(run_id)
-    project = services.store.get_project(run.project_id)
-    actions = services.store.list_plan_actions(project.id, plan_id=run.plan_id)
     quota = DailyQuotaStore(
         services.paths.quota,
         budget=services.settings_store.load().daily_upload_budget,
@@ -173,6 +193,7 @@ def _job_payload(
         LedgerRunStatus.QUEUED: "IDLE",
         LedgerRunStatus.RUNNING: "RUNNING",
         LedgerRunStatus.PAUSED: "PAUSED",
+        LedgerRunStatus.INTERRUPTED: "INTERRUPTED",
         LedgerRunStatus.COMPLETE: "COMPLETED",
         LedgerRunStatus.FAILED: "FAILED",
         LedgerRunStatus.CANCELLED: "STOPPED",
@@ -185,27 +206,46 @@ def _job_payload(
             "stopped": "STOPPED",
             "failed": "FAILED",
         }[snapshot.status]
-    bytes_total = sum(int((action.details or {}).get("source_size") or 0) for action in actions)
+    started_at = run.started_at
+    if started_at and started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    elapsed_seconds = (
+        max(0, int((datetime.now(UTC) - started_at).total_seconds())) if started_at else 0
+    )
+    processed = run.completed_items + run.failed_items + run.skipped_items
+    eta_seconds = None
+    if processed > 0 and run.total_items > processed and elapsed_seconds > 0:
+        eta_seconds = int(elapsed_seconds / processed * (run.total_items - processed))
     return {
         "id": run.id,
         "run_id": run.id,
         "project_id": run.project_id,
+        "kind": run.run_type.value,
+        "stage": run.current_stage,
         "state": state,
         "status": state,
-        "total": run.total_items or len(actions),
+        "total": run.total_items,
         "completed": run.completed_items,
+        "succeeded": run.completed_items,
         "failed": run.failed_items,
         "skipped": run.skipped_items,
         "conflicts": int((run.summary or {}).get("conflicts", 0)),
-        "current_path": snapshot.current_item if snapshot else "",
+        "current_path": run.current_item,
+        "current_item": run.current_item,
+        "last_message": run.last_message,
+        "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
+        "elapsed_seconds": elapsed_seconds,
+        "retry_count": run.retry_count,
+        "pause_requested": run.pause_requested,
+        "cancel_requested": run.cancel_requested,
         "progress": {
-            "total": run.total_items or len(actions),
+            "total": run.total_items,
             "completed": run.completed_items,
             "failed": run.failed_items,
         },
-        "bytes_total": bytes_total,
-        "bytes_completed": 0,
-        "eta_seconds": snapshot.eta_seconds if snapshot else None,
+        "bytes_total": run.bytes_total,
+        "bytes_completed": run.bytes_completed,
+        "eta_seconds": eta_seconds,
         "quota": {
             "upload_calls_used": quota.used,
             "upload_calls_limit": quota.budget,
@@ -258,6 +298,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        interrupted = services.store.interrupt_orphaned_job_runs(stale_after_seconds=0)
+        if interrupted:
+            LOGGER.warning("recovered %s orphaned durable task(s) on startup", interrupted)
         yield
         if owned_services:
             services.close()
@@ -277,6 +320,30 @@ def create_app(
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
     app.add_middleware(LocalRequestGuard, csrf_token=csrf_token)
+
+    @app.middleware("http")
+    async def request_observability(request: Request, call_next: Any) -> Response:
+        request_id = request.headers.get("x-request-id", "").strip() or uuid.uuid4().hex
+        token = request_id_var.set(request_id)
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            duration = time.perf_counter() - started
+            METRICS.record_api(request.url.path, duration, status_code)
+            log_method = LOGGER.warning if duration >= 1.0 else LOGGER.info
+            log_method(
+                "HTTP request completed",
+                extra={
+                    "path": request.url.path,
+                    "duration_ms": round(duration * 1000, 2),
+                },
+            )
+            request_id_var.reset(token)
 
     @app.exception_handler(ApiFailure)
     async def handle_api_failure(_: Request, exc: ApiFailure) -> JSONResponse:
@@ -322,6 +389,20 @@ def create_app(
     @app.get("/api/v2/health")
     def health() -> dict[str, Any]:
         return {"ok": True, "status": "ok", "version": __version__, "database": "ok"}
+
+    @app.get("/api/v2/metrics")
+    def metrics() -> dict[str, Any]:
+        snapshot = METRICS.snapshot()
+        statuses = services.store.job_status_counts()
+        snapshot["tasks"] = {
+            "running": statuses.get("RUNNING", 0),
+            "queued": statuses.get("QUEUED", 0),
+            "paused": statuses.get("PAUSED", 0),
+            "interrupted": statuses.get("INTERRUPTED", 0),
+            "complete": statuses.get("COMPLETE", 0),
+            "failed": statuses.get("FAILED", 0),
+        }
+        return snapshot
 
     @app.get("/api/v2/session")
     def session() -> dict[str, str]:
@@ -398,6 +479,17 @@ def create_app(
     def get_project(project_id: str) -> dict[str, Any]:
         return _project_payload(services, services.store.get_project(project_id))
 
+    @app.get("/api/v2/projects/{project_id}/tasks")
+    def list_project_tasks(
+        project_id: str,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        services.store.get_project(project_id)
+        return [
+            _job_payload(services, run.id)
+            for run in services.store.list_job_runs(project_id, limit=limit)
+        ]
+
     @app.patch("/api/v2/projects/{project_id}")
     def update_project(project_id: str, value: ProjectUpdate) -> dict[str, Any]:
         updates = value.model_dump(exclude_none=True)
@@ -418,27 +510,48 @@ def create_app(
     @app.post("/api/v2/projects/{project_id}/scan")
     def start_scan(project_id: str, _: EmptyCommand) -> dict[str, Any]:
         services.store.get_project(project_id)
+        active = services.store.find_active_job_run(project_id, RunType.SCAN)
+        if active:
+            return {"run_id": active.id, "status": active.status.value, "deduplicated": True}
+        durable = services.store.create_job_run(
+            project_id,
+            RunType.SCAN,
+            status=LedgerRunStatus.QUEUED,
+            current_stage="QUEUED",
+        )
 
         def worker(control: Any, update: Any) -> dict[str, Any]:
-            result = services.scanner.scan(
-                project_id,
-                cancel=lambda: control.stop_requested,
-                progress=lambda current: update(
-                    completed=current.scanned_items,
-                    current_item=current.current_rel_path,
-                    details={
-                        "scanned_items": current.scanned_items,
-                        "folders": current.folders,
-                        "files": current.files,
-                        "bytes": current.bytes,
-                    },
-                ),
-            )
+            with HeartbeatPump(
+                lambda: services.store.update_job_run(durable.id, heartbeat_at=utc_now())
+            ):
+                result = services.scanner.scan(
+                    project_id,
+                    run_id=durable.id,
+                    cancel=lambda: control.stop_requested,
+                    progress=lambda current: update(
+                        completed=current.scanned_items,
+                        current_item=current.current_rel_path,
+                        details={
+                            "scanned_items": current.scanned_items,
+                            "folders": current.folders,
+                            "files": current.files,
+                            "bytes": current.bytes,
+                        },
+                    ),
+                )
             return asdict(result)
 
         try:
-            job = services.jobs.start(project_id, "scan", worker)
+            job = services.jobs.start(project_id, "scan", worker, run_id=durable.id)
         except RuntimeError as exc:
+            services.store.update_job_run(
+                durable.id,
+                status=LedgerRunStatus.FAILED,
+                current_stage="FAILED",
+                last_message="无法启动本机后台盘点任务",
+                error=str(exc),
+                finished_at=utc_now(),
+            )
             if "已有任务正在运行" not in str(exc):
                 raise
             raise ApiFailure(
@@ -465,23 +578,155 @@ def create_app(
         }
 
     @app.get("/api/v2/projects/{project_id}/tree")
-    def get_tree(project_id: str) -> list[dict[str, Any]]:
-        return services.inventory_tree(project_id)
+    def get_tree(
+        project_id: str,
+        parent: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        items, total = services.store.list_inventory_children(
+            project_id,
+            parent_rel_path=parent,
+            limit=limit,
+            offset=offset,
+        )
+        child_counts = services.store.inventory_child_counts(
+            project_id,
+            (item.rel_path for item in items if item.kind.value == "FOLDER"),
+        )
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "relative_path": item.rel_path,
+                    "kind": item.kind.value.lower(),
+                    "size": item.size or 0,
+                    "status": item.state.value,
+                    "child_count": child_counts.get(item.rel_path, 0),
+                }
+                for item in items
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(items) < total,
+            "parent": parent,
+        }
 
     @app.post("/api/v2/projects/{project_id}/plan")
     def post_plan(project_id: str, command: PlanCommand) -> dict[str, Any]:
         if command.confirmed:
             return services.confirm_latest_plan(project_id)
-        preflight = services.preflight(project_id)
-        if not preflight.ready:
-            raise ApiFailure(
-                409,
-                "PREFLIGHT_BLOCKED",
-                "预检仍有阻断项，不能生成写入计划",
-                {"checks": preflight.checks},
+        active = services.store.find_active_job_run(project_id, RunType.PLAN)
+        if active:
+            return {**_job_payload(services, active.id), "accepted": True, "deduplicated": True}
+        durable = services.store.create_job_run(
+            project_id,
+            RunType.PLAN,
+            status=LedgerRunStatus.QUEUED,
+            current_stage="QUEUED",
+        )
+
+        def worker(control: Any, update: Any) -> dict[str, Any]:
+            with HeartbeatPump(
+                lambda: services.store.update_job_run(durable.id, heartbeat_at=utc_now())
+            ):
+                try:
+                    services.store.update_job_run(
+                        durable.id,
+                        status=LedgerRunStatus.RUNNING,
+                        current_stage="PREFLIGHT",
+                        last_message="正在检查权限、容量与目标知识库",
+                        started_at=utc_now(),
+                        heartbeat_at=utc_now(),
+                    )
+                    control.checkpoint()
+                    preflight = services.preflight(project_id)
+                    if not preflight.ready:
+                        raise ApiFailure(
+                            409,
+                            "PREFLIGHT_BLOCKED",
+                            "预检仍有阻断项，不能生成写入计划",
+                            {"checks": preflight.checks},
+                        )
+                    services.store.update_job_run(
+                        durable.id,
+                        current_stage="PLANNING",
+                        last_message="正在生成安全增量差异计划",
+                        heartbeat_at=utc_now(),
+                    )
+                    control.checkpoint()
+
+                    def plan_progress(completed: int, total: int, current: str) -> None:
+                        services.store.update_job_run(
+                            durable.id,
+                            total_items=total,
+                            completed_items=completed,
+                            current_item=current,
+                            last_message=f"正在生成差异计划：{completed:,} / {total:,}",
+                            heartbeat_at=utc_now(),
+                        )
+                        update(
+                            completed=completed,
+                            total=total,
+                            current_item=current,
+                        )
+
+                    result = services.planner.build(
+                        project_id,
+                        run_id=durable.id,
+                        progress=plan_progress,
+                        cancel=lambda: control.stop_requested,
+                    )
+                    services.store.update_job_run(
+                        durable.id,
+                        status=LedgerRunStatus.COMPLETE,
+                        current_stage="COMPLETED",
+                        total_items=result.total_actions,
+                        completed_items=result.total_actions,
+                        last_message="差异计划已生成，等待用户确认",
+                        summary={"plan_id": result.plan_id, "counts": result.counts},
+                        heartbeat_at=utc_now(),
+                        finished_at=utc_now(),
+                    )
+                    return asdict(result)
+                except Exception as exc:
+                    if control.stop_requested:
+                        services.store.update_job_run(
+                            durable.id,
+                            status=LedgerRunStatus.CANCELLED,
+                            current_stage="CANCELLED",
+                            last_message="差异计划任务已由用户停止",
+                            cancel_requested=True,
+                            heartbeat_at=utc_now(),
+                            finished_at=utc_now(),
+                        )
+                    else:
+                        services.store.update_job_run(
+                            durable.id,
+                            status=LedgerRunStatus.FAILED,
+                            current_stage="FAILED",
+                            last_message=str(exc),
+                            error=f"{type(exc).__name__}: {exc}",
+                            heartbeat_at=utc_now(),
+                            finished_at=utc_now(),
+                        )
+                    raise
+
+        try:
+            job = services.jobs.start(project_id, "plan", worker, run_id=durable.id)
+        except Exception as exc:
+            services.store.update_job_run(
+                durable.id,
+                status=LedgerRunStatus.FAILED,
+                current_stage="FAILED",
+                last_message="无法启动本机计划任务",
+                error=f"{type(exc).__name__}: {exc}",
+                finished_at=utc_now(),
             )
-        services.planner.build(project_id)
-        return services.plan_payload(project_id)
+            raise
+        return {**_job_payload(services, durable.id, job), "accepted": True}
 
     @app.get("/api/v2/projects/{project_id}/plan")
     def get_plan(project_id: str) -> dict[str, Any]:
@@ -492,8 +737,12 @@ def create_app(
         *,
         plan_id: str | None = None,
         scan_id: str | None = None,
+        existing_run_id: str | None = None,
     ) -> dict[str, Any]:
         project = services.store.get_project(project_id)
+        active = services.store.find_active_job_run(project_id, RunType.MIGRATION)
+        if active and active.id != existing_run_id:
+            return {**_job_payload(services, active.id), "deduplicated": True}
         if scan_id and project.current_scan_id != scan_id:
             raise ApiFailure(
                 409,
@@ -506,22 +755,56 @@ def create_app(
         selected_plan_id = actions[0].plan_id
         if any(action.plan_id != selected_plan_id for action in actions):
             raise ApiFailure(409, "PLAN_INCONSISTENT", "迁移计划状态不一致，请重新生成计划")
-        durable = services.store.create_job_run(
-            project_id,
-            RunType.MIGRATION,
-            status=LedgerRunStatus.QUEUED,
-            scan_id=scan_id or project.current_scan_id,
-            plan_id=selected_plan_id,
-        )
+        stats = services.store.plan_run_summary(project_id, selected_plan_id)
+        if existing_run_id:
+            durable = services.store.update_job_run(
+                existing_run_id,
+                status=LedgerRunStatus.QUEUED,
+                total_items=stats["total"],
+                bytes_total=stats["bytes_total"],
+                current_stage="QUEUED",
+                current_item="",
+                last_message="任务已进入恢复队列",
+                pause_requested=False,
+                cancel_requested=False,
+                heartbeat_at=utc_now(),
+                finished_at=None,
+                error="",
+            )
+        else:
+            durable = services.store.create_job_run(
+                project_id,
+                RunType.MIGRATION,
+                status=LedgerRunStatus.QUEUED,
+                scan_id=scan_id or project.current_scan_id,
+                plan_id=selected_plan_id,
+                total_items=stats["total"],
+                bytes_total=stats["bytes_total"],
+                current_stage="QUEUED",
+            )
 
         def worker(control: Any, update: Any) -> dict[str, Any]:
-            result = services.executor().execute(
-                project_id,
-                run_id=durable.id,
-                control=control,
-                progress=update,
-            )
-            return asdict(result)
+            try:
+                result = services.executor().execute(
+                    project_id,
+                    run_id=durable.id,
+                    control=control,
+                    progress=update,
+                )
+                return asdict(result)
+            except Exception as exc:
+                current = services.store.get_job_run(durable.id)
+                if current.status in {LedgerRunStatus.QUEUED, LedgerRunStatus.RUNNING}:
+                    services.store.update_job_run(
+                        durable.id,
+                        status=LedgerRunStatus.FAILED,
+                        current_stage="FAILED",
+                        last_message="后台迁移任务异常退出",
+                        heartbeat_at=utc_now(),
+                        error=f"{type(exc).__name__}: {exc}",
+                        finished_at=utc_now(),
+                    )
+                raise
 
         try:
             job = services.jobs.start(
@@ -550,13 +833,40 @@ def create_app(
             snapshot = services.jobs.get(run_id)
         except KeyError:
             snapshot = None
+        durable = services.store.get_job_run(run_id)
+        heartbeat = durable.heartbeat_at
+        if heartbeat and heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=UTC)
+        if (
+            snapshot is None
+            and durable.status in {LedgerRunStatus.QUEUED, LedgerRunStatus.RUNNING}
+            and (heartbeat is None or (datetime.now(UTC) - heartbeat).total_seconds() > 30)
+        ):
+            services.store.update_job_run(
+                run_id,
+                status=LedgerRunStatus.INTERRUPTED,
+                current_stage="INTERRUPTED",
+                last_message="任务心跳已中断，可从已落库断点继续",
+                finished_at=utc_now(),
+            )
         return _job_payload(services, run_id, snapshot)
 
     @app.post("/api/v2/runs/{run_id}/pause")
     def pause_run(run_id: str, _: EmptyCommand) -> dict[str, Any]:
-        snapshot = services.jobs.pause(run_id)
-        services.store.update_job_run(run_id, status=LedgerRunStatus.PAUSED)
-        services.store.update_project(snapshot.project_id, status=ProjectStatus.PAUSED)
+        run = services.store.get_job_run(run_id)
+        try:
+            snapshot = services.jobs.pause(run_id)
+        except KeyError:
+            snapshot = None
+        services.store.update_job_run(
+            run_id,
+            status=LedgerRunStatus.PAUSED,
+            current_stage="PAUSED",
+            last_message="用户已请求安全暂停",
+            pause_requested=True,
+            heartbeat_at=utc_now(),
+        )
+        services.store.update_project(run.project_id, status=ProjectStatus.PAUSED)
         return _job_payload(services, run_id, snapshot)
 
     @app.post("/api/v2/runs/{run_id}/resume")
@@ -581,13 +891,33 @@ def create_app(
                 previous.project_id,
                 plan_id=previous.plan_id,
                 scan_id=previous.scan_id,
+                existing_run_id=previous.id,
             )
         services.store.update_job_run(run_id, status=LedgerRunStatus.RUNNING)
         return _job_payload(services, run_id, snapshot)
 
     @app.post("/api/v2/runs/{run_id}/stop")
     def stop_run(run_id: str, _: EmptyCommand) -> dict[str, Any]:
-        snapshot = services.jobs.stop(run_id)
+        run = services.store.get_job_run(run_id)
+        services.store.update_job_run(
+            run_id,
+            cancel_requested=True,
+            last_message="正在等待当前网络操作结束后停止",
+            heartbeat_at=utc_now(),
+        )
+        try:
+            snapshot = services.jobs.stop(run_id)
+        except KeyError:
+            snapshot = None
+            services.store.update_job_run(
+                run_id,
+                status=LedgerRunStatus.CANCELLED,
+                current_stage="CANCELLED",
+                current_item="",
+                last_message="任务已停止",
+                finished_at=utc_now(),
+            )
+            services.store.update_project(run.project_id, status=ProjectStatus.PAUSED)
         return _job_payload(services, run_id, snapshot)
 
     @app.post("/api/v2/runs/{run_id}/retry")
@@ -609,28 +939,58 @@ def create_app(
             previous.project_id,
             plan_id=previous.plan_id,
             scan_id=previous.scan_id,
+            existing_run_id=previous.id,
         )
 
     @app.post("/api/v2/projects/{project_id}/reconcile")
     def reconcile(project_id: str, _: EmptyCommand) -> dict[str, Any]:
-        summary = services.reconciler().reconcile(project_id)
-        return {
-            "status": "complete",
-            "checked": summary.checked,
-            "matched": summary.matched,
-            "missing": summary.missing,
-            "missing_remote": summary.missing,
-            "conflicts": summary.conflicts,
-            "checked_at": datetime.now(UTC).isoformat(),
-        }
+        active = services.store.find_active_job_run(project_id, RunType.RECONCILIATION)
+        if active:
+            return {**_job_payload(services, active.id), "accepted": True, "deduplicated": True}
+        durable = services.store.create_job_run(
+            project_id,
+            RunType.RECONCILIATION,
+            status=LedgerRunStatus.QUEUED,
+            current_stage="QUEUED",
+        )
+
+        def worker(control: Any, update: Any) -> dict[str, Any]:
+            summary = services.reconciler().reconcile(
+                project_id,
+                run_id=durable.id,
+                control=control,
+                progress=update,
+            )
+            return asdict(summary)
+
+        try:
+            job = services.jobs.start(
+                project_id,
+                "reconciliation",
+                worker,
+                run_id=durable.id,
+            )
+        except Exception as exc:
+            services.store.update_job_run(
+                durable.id,
+                status=LedgerRunStatus.FAILED,
+                current_stage="FAILED",
+                last_message="无法启动远端对账任务",
+                error=f"{type(exc).__name__}: {exc}",
+                finished_at=utc_now(),
+            )
+            raise
+        return {**_job_payload(services, durable.id, job), "accepted": True}
 
     @app.get("/api/v2/projects/{project_id}/audit", response_model=None)
     def audit(
         project_id: str,
         format: str | None = Query(default=None, pattern="^(csv|json)$"),
+        after_id: int | None = Query(default=None, ge=0),
+        limit: int = Query(default=200, ge=1, le=2_000),
     ) -> Response | dict[str, Any]:
-        rows = _audit_rows(services, project_id)
         if format == "csv":
+            rows = _audit_rows(services, project_id)
             return Response(
                 export_audit_csv(rows),
                 media_type="text/csv; charset=utf-8",
@@ -641,6 +1001,7 @@ def create_app(
                 },
             )
         if format == "json":
+            rows = _audit_rows(services, project_id)
             return Response(
                 export_audit_json(rows),
                 media_type="application/json; charset=utf-8",
@@ -665,7 +1026,12 @@ def create_app(
                 "message": event.message,
                 "evidence": json_safe_evidence(event.payload),
             }
-            for event in services.store.list_audit(project_id)
+            for event in services.store.list_audit(
+                project_id,
+                after_id=after_id,
+                limit=limit,
+                latest=after_id is None,
+            )
         ]
         items = [
             {
@@ -678,9 +1044,13 @@ def create_app(
                 "error_message": (action.details or {}).get("last_error"),
                 "updated_at": action.updated_at.isoformat(),
             }
-            for action in services.store.list_plan_actions(project_id)
+            for action in services.store.list_plan_action_statuses(project_id, limit=limit)
         ]
-        return {"events": events, "items": items}
+        return {
+            "events": events,
+            "items": items,
+            "next_after_id": int(events[-1]["id"] or 0) if events else after_id,
+        }
 
     root = static_root or bundled_path("frontend", "dist")
     assets = root / "assets"

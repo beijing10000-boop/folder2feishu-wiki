@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuWiki"),
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuWikiNext"),
     [string]$PythonCommand = "",
     [switch]$NoShortcut,
     [switch]$SkipLaunch
@@ -16,7 +16,7 @@ else {
     (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
-$runtimeDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuWiki"
+$runtimeDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
 $sameLocation = $sourceRoot.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase)
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "folder2feishu\__main__.py"))) {
@@ -136,7 +136,7 @@ Remove-LegacySchedules
 
 if (-not $NoShortcut) {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktop "Folder2Feishu Wiki.lnk"
+    $shortcutPath = Join-Path $desktop "Folder2Feishu Wiki Next.lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = (Get-Command "powershell.exe").Source

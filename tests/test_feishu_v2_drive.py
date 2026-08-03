@@ -116,8 +116,10 @@ def test_can_edit_wiki_checks_container_edit_permission():
 
 def test_root_and_staging_folders_return_explicit_tokens():
     created = {}
+    requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
         if request.url.path.endswith("/root_folder/meta"):
             return httpx.Response(200, json={"code": 0, "data": {"token": "root-token"}})
         if request.method == "GET" and request.url.path.endswith("/drive/v1/files"):
@@ -132,13 +134,27 @@ def test_root_and_staging_folders_return_explicit_tokens():
             return httpx.Response(200, json={"code": 0, "data": {"token": token}})
         raise AssertionError(request.url)
 
-    location = _service(handler).ensure_staging("project-A", shard_index=7)
+    service = _service(handler)
+    location = service.ensure_staging("project-A", shard_index=7)
     assert location.root_token == "folder-1"
     assert location.project_token == "folder-2"
     assert location.shard_token == "folder-3"
     assert created["Folder2Feishu-Staging"][0] == "root-token"
     assert "project-" in next(name for name in created if name.startswith("project-"))
     assert created["shard-000007"][0] == "folder-2"
+
+    first_request_count = len(requests)
+    assert service.ensure_staging("project-A", shard_index=7) == location
+    assert len(requests) == first_request_count
+
+    next_shard = service.ensure_staging("project-A", shard_index=8)
+    assert next_shard.root_token == location.root_token
+    assert next_shard.project_token == location.project_token
+    assert next_shard.shard_token == "folder-4"
+    assert requests[first_request_count:] == [
+        ("GET", "/open-apis/drive/v1/files"),
+        ("POST", "/open-apis/drive/v1/files/create_folder"),
+    ]
 
 
 def test_upload_all_always_sends_nonempty_parent_and_persists_before_rename(tmp_path):

@@ -22,7 +22,7 @@ $stateDir = if ($RuntimeDir) {
     [System.IO.Path]::GetFullPath($RuntimeDir)
 }
 else {
-    Join-Path $env:LOCALAPPDATA "Folder2FeishuWiki"
+    Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
 }
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 $pidFile = Join-Path $stateDir "server.pid"

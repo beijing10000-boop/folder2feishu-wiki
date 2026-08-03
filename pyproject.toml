@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "folder2feishu-wiki"
-version = "1.0.0rc11"
+version = "2.0.0rc2"
 description = "A recoverable Windows local-folder mirror for Feishu Wiki."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,6 +13,7 @@ authors = [{name = "folder2feishu-wiki contributors"}]
 dependencies = [
   "fastapi>=0.141.1,<0.142",
   "httpx>=0.28.1,<0.29",
+  "psutil>=6.0,<8",
   "pydantic>=2.13.4,<3",
   "python-multipart>=0.0.20,<0.1",
   "SQLAlchemy>=2.0.42,<3",

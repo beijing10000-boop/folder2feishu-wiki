@@ -50,6 +50,10 @@ class IntervalRateLimiter:
 
 class RateLimitSet:
     DRIVE_UPLOAD = "drive_upload"
+    WIKI_CREATE = "wiki_create"
+    WIKI_READ = "wiki_read"
+    WIKI_WRITE = "wiki_write"
+    # Backward-compatible alias used by callers outside the v2 services.
     WIKI = "wiki"
     GENERAL = "general"
 
@@ -58,20 +62,31 @@ class RateLimitSet:
         *,
         drive_upload: RateLimiter | None = None,
         wiki: RateLimiter | None = None,
+        wiki_create: RateLimiter | None = None,
+        wiki_read: RateLimiter | None = None,
+        wiki_write: RateLimiter | None = None,
         general: RateLimiter | None = None,
     ) -> None:
+        legacy_wiki = wiki or IntervalRateLimiter(90, 60)
         self._groups: dict[str, RateLimiter] = {
             self.DRIVE_UPLOAD: drive_upload or IntervalRateLimiter(4, 1),
-            self.WIKI: wiki or IntervalRateLimiter(90, 60),
+            self.WIKI: legacy_wiki,
+            self.WIKI_CREATE: wiki_create or legacy_wiki,
+            self.WIKI_READ: wiki_read or legacy_wiki,
+            self.WIKI_WRITE: wiki_write or legacy_wiki,
             self.GENERAL: general or IntervalRateLimiter(20, 1),
         }
 
     @classmethod
     def disabled(cls) -> RateLimitSet:
+        noop = NoopRateLimiter()
         return cls(
-            drive_upload=NoopRateLimiter(),
-            wiki=NoopRateLimiter(),
-            general=NoopRateLimiter(),
+            drive_upload=noop,
+            wiki=noop,
+            wiki_create=noop,
+            wiki_read=noop,
+            wiki_write=noop,
+            general=noop,
         )
 
     def acquire(self, group: str) -> None:
