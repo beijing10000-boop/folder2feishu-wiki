@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatEta, formatPercent } from "./utils";
+import {
+  formatBytes,
+  formatEta,
+  formatLocalDateTime,
+  formatLocalTime,
+  formatPercent,
+  parseServerDate
+} from "./utils";
 
 describe("迁移作业台格式化", () => {
   it("以适合运维阅读的单位显示数据量", () => {
@@ -18,5 +25,16 @@ describe("迁移作业台格式化", () => {
     expect(formatEta(45)).toBe("45 秒");
     expect(formatEta(90)).toBe("2 分钟");
     expect(formatEta(172_800)).toBe("2.0 天");
+  });
+
+  it("把数据库无时区时间按 UTC 解析后显示为 Windows 本地时间", () => {
+    expect(parseServerDate("2026-08-03T05:18:26").toISOString()).toBe(
+      "2026-08-03T05:18:26.000Z"
+    );
+    expect(parseServerDate("2026-08-03T05:18:26+00:00").toISOString()).toBe(
+      "2026-08-03T05:18:26.000Z"
+    );
+    expect(formatLocalTime("2026-08-03T05:18:26")).not.toBe("");
+    expect(formatLocalDateTime("2026-08-03T05:18:26")).not.toBe("");
   });
 });

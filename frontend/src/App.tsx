@@ -64,6 +64,8 @@ import {
   downloadBlob,
   formatBytes,
   formatEta,
+  formatLocalDateTime,
+  formatLocalTime,
   formatPercent
 } from "./utils";
 
@@ -2232,7 +2234,7 @@ function App() {
                 <div>
                   <span className="eyebrow">IMMUTABLE WRITE PROPOSAL · {plan.id}</span>
                   <h2>每一项远端动作，先看清再执行</h2>
-                  <p>生成于 {new Date(plan.created_at).toLocaleString("zh-CN")} · 调用总次数不设上限</p>
+                  <p>生成于 {formatLocalDateTime(plan.created_at)} · 调用总次数不设上限</p>
                 </div>
                 <div className={`confirmation-seal ${plan.confirmed ? "is-confirmed" : ""}`}>
                   {plan.confirmed ? <BadgeCheck size={22} /> : <FileClock size={22} />}
@@ -2458,7 +2460,7 @@ function App() {
                       {events.length ? events.map((event) => (
                         <article className={`timeline__event is-${event.level.toLowerCase()}`} key={event.id}>
                           <i />
-                          <time>{new Date(event.occurred_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                          <time>{formatLocalTime(event.occurred_at)}</time>
                           <div>
                             <span>{event.stage}</span>
                             <strong>{event.message}</strong>
