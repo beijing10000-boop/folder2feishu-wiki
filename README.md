@@ -41,9 +41,20 @@ D:\Team FabDazzle - 文档
 
 首次安装：
 
+目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/perf/stability-v1/deploy/Install-Online.ps1' | iex"
+```
+
+脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
+Git、GitHub CLI、Node.js 或 Go。
+
+离线安装：
+
 1. 解压 `Folder2Feishu-Python-*.zip`。
 2. 双击 `Install.cmd`；脚本会建立独立 Python 虚拟环境并创建桌面快捷方式。
-3. 以后双击桌面的 `Folder2Feishu Wiki`，浏览器会打开 `http://127.0.0.1:8000`。
+3. 以后双击桌面的 `Folder2Feishu Wiki Next`，浏览器会打开 `http://127.0.0.1:8000`。
 
 程序仅监听本机。应用源码默认安装到：
 
