@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/perf/stability-v1/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.1/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
