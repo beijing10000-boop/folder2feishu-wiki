@@ -225,7 +225,21 @@ class ApplicationServices:
                     self._client.close()
                 limits = RateLimitSet(
                     drive_upload=IntervalRateLimiter(settings.upload_qps, 1),
-                    wiki=IntervalRateLimiter(settings.wiki_calls_per_minute, 60),
+                    # Feishu applies limits per endpoint.  Keeping reads,
+                    # creates and writes in one bucket made harmless task
+                    # polling consume the node-create budget.
+                    wiki_create=IntervalRateLimiter(
+                        settings.wiki_calls_per_minute,
+                        60,
+                    ),
+                    wiki_read=IntervalRateLimiter(
+                        settings.wiki_calls_per_minute,
+                        60,
+                    ),
+                    wiki_write=IntervalRateLimiter(
+                        settings.wiki_calls_per_minute,
+                        60,
+                    ),
                 )
                 self._client = FeishuAPIClient(self.token_provider(), rate_limits=limits)
                 self._api_client_key = key

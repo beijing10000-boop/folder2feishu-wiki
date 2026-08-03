@@ -185,6 +185,7 @@ class MigrationExecutor:
         self.drive = drive
         self.wiki = wiki
         self.quota = quota
+        self._folder_token_cache: dict[tuple[str, str], str] = {}
 
     def execute(
         self,
@@ -588,18 +589,60 @@ class MigrationExecutor:
     def _create_folder(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
         parent_token = self._destination_parent(project, item.rel_path)
         title = project.wrapper_name if item.rel_path == "" else item.name
-        node = self.wiki.ensure_docx_node(project.target_space_id, title, parent_token)
+        current = self.store.get_plan_action(action.id)
+        details = current.details or {}
+        if current.wiki_node_token:
+            # A prior process persisted the token before it stopped.  Resume
+            # with a read-only reconciliation and never create a duplicate.
+            result = self.wiki.reconcile_node(
+                current.wiki_node_token,
+                expected_space_id=project.target_space_id,
+                expected_parent_token=parent_token,
+                expected_title=title,
+                expected_obj_token=current.object_token or None,
+            )
+            if result.status != ReconcileStatus.MATCH or not result.node:
+                raise MigrationBlocked(
+                    "已记录的目录节点与预期不一致：" + ",".join(result.differences)
+                )
+            node = result.node
+        elif details.get("folder_create_started"):
+            # The process may have stopped between POST and token persistence.
+            # The existing reconciliation path is intentionally retained only
+            # for this recovery case.
+            node = self.wiki.ensure_docx_node(project.target_space_id, title, parent_token)
+        else:
+            # Persist intent before the write.  A normal create now needs one
+            # POST instead of list + POST + get; a restart remains recoverable
+            # through the branch above.
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.VERIFYING,
+                merge_details={"folder_create_started": True},
+            )
+            try:
+                node = self.wiki.create_docx_node(
+                    project.target_space_id,
+                    title,
+                    parent_token,
+                )
+            except FeishuAmbiguousWriteError:
+                node = self.wiki.ensure_docx_node(
+                    project.target_space_id,
+                    title,
+                    parent_token,
+                )
         wiki_token = str(node["node_token"])
         object_token = str(node.get("obj_token") or "")
-        result = self.wiki.reconcile_node(
-            wiki_token,
-            expected_space_id=project.target_space_id,
-            expected_parent_token=parent_token,
-            expected_title=title,
-            expected_obj_token=object_token or None,
+        # Persist the returned tokens immediately.  The create response is the
+        # normal-path write evidence; full remote reconciliation is deferred
+        # to explicit audit/recovery instead of adding one GET per folder.
+        self.store.update_plan_action(
+            action.id,
+            state=MigrationState.VERIFYING,
+            wiki_node_token=wiki_token,
+            object_token=object_token,
         )
-        if result.status != ReconcileStatus.MATCH:
-            raise MigrationBlocked("新建目录节点与预期不一致：" + ",".join(result.differences))
         self.store.upsert_remote_mapping(
             project_id=project.id,
             inventory_item_id=item.id,
@@ -625,6 +668,7 @@ class MigrationExecutor:
                 "object_token": object_token,
             },
         )
+        self._folder_token_cache[(project.id, item.rel_path)] = wiki_token
 
     def _upload_file(
         self,
@@ -993,11 +1037,16 @@ class MigrationExecutor:
         parent_rel = _parent_rel_path(rel_path)
         if parent_rel is None:
             return project.target_parent_node_token
+        cache_key = (project.id, parent_rel)
+        cached = self._folder_token_cache.get(cache_key)
+        if cached:
+            return cached
         mapping = self.store.find_current_remote_mapping(project.id, rel_path=parent_rel)
         if mapping is None or mapping.item_kind != ItemKind.FOLDER:
             raise MigrationBlocked(f"目标父目录尚未建立：{parent_rel or project.wrapper_name}")
         if mapping.remote_status != RemoteStatus.ACTIVE:
             raise MigrationBlocked("目标父目录远端状态异常")
+        self._folder_token_cache[cache_key] = mapping.wiki_node_token
         return mapping.wiki_node_token
 
     def _mapping_for_action(self, action: PlannedAction) -> RemoteMapping:

@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.1/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.2/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -92,6 +92,17 @@ Git、GitHub CLI、Node.js 或 Go。
 
 更新脚本会停止旧服务、替换应用源码、更新 Python 依赖并重新启动。SQLite 台账、
 DPAPI 凭据、配置、日志和审计导出不会被覆盖。
+
+### 2.0.0-rc.2 单应用性能优化
+
+- 中转目录 token 按项目和每 1,000 项分片缓存，不再为每个文件重复查询云盘根目录、项目目录和分片目录。
+- 新目录首次创建只调用一次创建接口；仅在响应不确定或进程恢复时查询远端，继续保留防重复机制。
+- Wiki 节点创建、只读查询和迁移写入使用独立限速通道，任务轮询不再占用目录创建额度。
+- 当前运行期间缓存本地相对路径到 Wiki 父节点 token，避免为每个文件重复查询 SQLite。
+- 所有 `file_token`、`task_id`、`wiki_token` 的即时落库和重启恢复规则保持不变。
+
+正式环境升级前先点击“安全暂停”，等待当前对象完成并显示暂停后，再执行更新命令。
+升级不会重新盘点，也不会清空现有台账；重新打开后在“运行对账”页继续原任务。
 
 ## 飞书应用配置
 

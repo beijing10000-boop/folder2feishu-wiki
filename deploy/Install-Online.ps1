@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v2.0.0-rc.1",
+    [string]$Version = "v2.0.0-rc.2",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuWikiNext")
 )
