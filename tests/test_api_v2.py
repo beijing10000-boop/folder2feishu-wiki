@@ -169,6 +169,59 @@ def test_scan_status_does_not_materialize_the_complete_inventory_tree(
     assert summary_calls == 1
 
 
+def test_plan_submission_returns_a_durable_task_and_deduplicates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.store.create_project(
+        name="background-plan",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+    )
+    starts = 0
+
+    def fake_start(project_id, kind, worker, *, run_id=None):
+        nonlocal starts
+        starts += 1
+        return JobSnapshot(run_id=run_id, project_id=project_id, kind=kind)
+
+    monkeypatch.setattr(services.jobs, "start", fake_start)
+    app = create_app(services, static_root=Path("frontend/dist").resolve())
+    try:
+        with TestClient(app) as client:
+            csrf = client.get("/api/v2/session").json()["csrf_token"]
+            headers = {"X-F2F-CSRF": csrf}
+            first = client.post(
+                f"/api/v2/projects/{project.id}/plan",
+                headers=headers,
+                json={"confirmed": False},
+            )
+            second = client.post(
+                f"/api/v2/projects/{project.id}/plan",
+                headers=headers,
+                json={"confirmed": False},
+            )
+            tasks = client.get(f"/api/v2/projects/{project.id}/tasks")
+    finally:
+        services.close()
+
+    assert first.status_code == 200, first.text
+    assert first.json()["kind"] == "PLAN"
+    assert first.json()["id"]
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["deduplicated"] is True
+    assert starts == 1
+    assert tasks.status_code == 200, tasks.text
+    assert tasks.json()[0]["id"] == first.json()["id"]
+
+
 def test_retry_and_restart_resume_keep_the_original_plan(
     tmp_path: Path,
     monkeypatch,

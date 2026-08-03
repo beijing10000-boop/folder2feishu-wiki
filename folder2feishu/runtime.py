@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_DIR_NAME = "Folder2FeishuWiki"
+APP_DIR_NAME = "Folder2FeishuWikiNext"
 
 
 @dataclass(frozen=True, slots=True)

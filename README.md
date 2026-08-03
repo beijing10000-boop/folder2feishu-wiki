@@ -35,6 +35,10 @@ D:\Team FabDazzle - 文档
 本项目不再提供或使用 PyInstaller EXE、Inno Setup 安装器。目标电脑只需安装
 **Python 3.12（64 位）**，不需要 Git、GitHub CLI、Node.js 或 Go。
 
+2.0 版按全新程序安装，使用独立的 `Folder2FeishuWikiNext` 目录，不读取或转换
+旧版数据库、配置和凭据。旧版本可保留作回退，但启动新版前必须先关闭占用 8000
+端口的旧进程。
+
 首次安装：
 
 1. 解压 `Folder2Feishu-Python-*.zip`。
@@ -44,13 +48,13 @@ D:\Team FabDazzle - 文档
 程序仅监听本机。应用源码默认安装到：
 
 ```text
-%LOCALAPPDATA%\Programs\Folder2FeishuWiki
+%LOCALAPPDATA%\Programs\Folder2FeishuWikiNext
 ```
 
 运行数据位于：
 
 ```text
-%LOCALAPPDATA%\Folder2FeishuWiki
+%LOCALAPPDATA%\Folder2FeishuWikiNext
 ├─ ledger.sqlite3
 ├─ settings.json
 ├─ credentials.bin
@@ -66,13 +70,13 @@ D:\Team FabDazzle - 文档
 - 私有 GitHub 仓库在线更新：
 
   ```powershell
-  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki\Update-Folder2Feishu.ps1" -GitHubToken "<只需仓库读取权限的Token>" -IncludePrerelease
+  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWikiNext\Update-Folder2Feishu.ps1" -GitHubToken "<只需仓库读取权限的Token>" -IncludePrerelease
   ```
 
 - 离线更新：从 Release 下载新 ZIP 后运行：
 
   ```powershell
-  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki\Update-Folder2Feishu.ps1" -PackagePath "D:\下载\Folder2Feishu-Python-新版本.zip"
+  powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuWikiNext\Update-Folder2Feishu.ps1" -PackagePath "D:\下载\Folder2Feishu-Python-新版本.zip"
   ```
 
 更新脚本会停止旧服务、替换应用源码、更新 Python 依赖并重新启动。SQLite 台账、
@@ -117,6 +121,11 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
    大文件的预上传、各分片和完成请求会分别计数，所以调用量可能高于文件数。
 5. **运行与对账**：执行、暂停、恢复、失败重试、远端对账，并导出 CSV/JSON 审计报告。
 
+盘点、计划生成、迁移和远端对账均为持久化后台任务：按钮点击后接口立即返回任务 ID，
+页面通过增量状态查询显示阶段、进度、当前对象、成功/失败/跳过数量、耗时、预计剩余时间
+和最新日志。刷新或关闭浏览器不会丢失任务；服务意外退出后，遗留任务会标记为“已中断”，
+可从已落库断点继续，不会永久显示“处理中”。
+
 本版本仅面向 Windows 桌面端，不包含移动端适配或移动端验收。
 
 正式全量迁移前必须先用 3–10 个代表文件做小批试迁，并包含三级目录、空目录和一个大于 20 MB 的文件。
@@ -129,6 +138,8 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 - 每个请求使用非空 `parent_node`。获得 `file_token`、`task_id`、`wiki_token` 后立即写入 SQLite。
 - 请求超时先查询远端状态；不会因为本地未及时落库就盲目重传。
 - 上传队列最高 4 QPS，Wiki 操作最高 90 次/分钟；工具不限制每日累计调用次数，遇到飞书 429 或服务异常时自动退避重试。
+- 飞书请求配置连接、读取、写入和连接池超时；临时网络错误有限次指数退避，等待期间仍可暂停或取消。
+- 文件、计划动作和远端映射均分批读取和写入；界面目录树按需展开，日志只增量读取，避免一次加载数万行。
 - SQLite 启用 WAL、`busy_timeout`、schema migration 和项目级执行锁；同一个项目不能被两个实例同时执行。
 - 扫描不完整、预检阻断、计划未确认或发现远端人工改动时，执行器拒绝写入。
 
@@ -150,7 +161,7 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 手动无界面运行一个已配置项目：
 
 ```powershell
-cd "$env:LOCALAPPDATA\Programs\Folder2FeishuWiki"
+cd "$env:LOCALAPPDATA\Programs\Folder2FeishuWikiNext"
 .\.venv\Scripts\python.exe -m folder2feishu --run-project <项目ID>
 ```
 
@@ -194,6 +205,9 @@ $env:FOLDER2FEISHU_RUN_SCALE_TEST = "1"
 
 发布工作流会在 Windows 上运行后端检查、前端构建、Python 源码包安装测试和网页
 健康检查。发布产物不包含应用 EXE，也不使用 PyInstaller 或 Inno Setup。
+
+本次后台任务、断点恢复、网络连接池和规模测试的完整诊断与回滚说明见
+[`docs/PERFORMANCE_STABILITY_V2.md`](docs/PERFORMANCE_STABILITY_V2.md)。
 
 ## Clean-room 说明
 

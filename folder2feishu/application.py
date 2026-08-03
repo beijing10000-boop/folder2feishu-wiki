@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -442,39 +441,17 @@ class ApplicationServices:
 
     def inventory_summary(self, project_id: str) -> dict[str, Any]:
         project = self.store.get_project(project_id)
-        items = self.store.list_inventory(project_id, present=True)
-        issues = self.store.list_issues(project_id, scan_id=project.current_scan_id)
+        summary = self.store.inventory_dashboard_summary(
+            project_id,
+            scan_id=project.current_scan_id,
+        )
         scan_run_summary: dict[str, Any] = {}
         for run in self.store.list_job_runs(project_id, limit=20):
             if run.scan_id == project.current_scan_id:
                 scan_run_summary = dict(run.summary or {})
                 break
-        files = [item for item in items if item.kind.value == "FILE"]
-        folders = [item for item in items if item.kind.value == "FOLDER"]
-        calls = sum(
-            1
-            if (item.size or 0) <= 20 * 1024 * 1024
-            else 2 + math.ceil((item.size or 0) / (4 * 1024 * 1024))
-            for item in files
-            if (item.size or 0) > 0
-        )
         return {
-            "files": len(files),
-            "folders": len(folders),
-            "bytes": sum(item.size or 0 for item in files),
-            "empty_files": sum((item.size or 0) == 0 for item in files),
-            "placeholders": sum(
-                item.is_offline or item.is_recall_on_open or item.is_recall_on_data_access
-                for item in items
-            ),
-            "too_long_names": sum(issue.code.value == "NAME_TOO_LONG" for issue in issues),
-            "unreadable": sum(
-                issue.code.value in {"STAT_ERROR", "HASH_ERROR", "ENUMERATION_ERROR"}
-                for issue in issues
-            ),
-            "max_depth": max((item.depth for item in items), default=0),
-            "max_siblings": self._max_siblings(items),
-            "upload_calls": calls,
+            **summary,
             "hashes_computed": int(scan_run_summary.get("hashes_computed", 0)),
             "hashes_reused": int(scan_run_summary.get("hashes_reused", 0)),
             "estimated_days": 0,
@@ -512,8 +489,8 @@ class ApplicationServices:
         return roots
 
     def plan_payload(self, project_id: str) -> dict[str, Any]:
-        actions = self.store.list_plan_actions(project_id)
-        if not actions:
+        plan_id = self.store.latest_plan_id(project_id)
+        if not plan_id:
             return {
                 "id": "",
                 "plan_id": "",
@@ -527,88 +504,75 @@ class ApplicationServices:
                 "estimated_days": 0,
                 "confirmed": False,
             }
-        inventory = {item.id: item for item in self.store.list_inventory(project_id)}
-        counts: dict[str, int] = {}
-        preview_counts: dict[str, int] = {}
+        dashboard = self.store.plan_dashboard(
+            project_id,
+            plan_id,
+            preview_limit=PLAN_PREVIEW_PER_KIND,
+        )
+        first = dashboard["first"]
         rows: list[dict[str, Any]] = []
-        upload_calls = 0
-        writable_actions = 0
-        blocking_conflicts = 0
-        for action in actions:
+        for action, raw_size in dashboard["previews"]:
             kind = action.action_type.value
-            counts[kind] = counts.get(kind, 0) + 1
-            item = inventory.get(action.inventory_item_id or "")
-            size = item.size or 0 if item else 0
-            if action.action_type in {
-                ActionType.UPLOAD,
-                ActionType.VERSION_UPDATE,
-            }:
-                upload_calls += (
-                    0
-                    if size == 0
-                    else 1
-                    if size <= 20 * 1024 * 1024
-                    else 2 + math.ceil(size / (4 * 1024 * 1024))
-                )
-            if action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}:
-                writable_actions += 1
+            size = int(raw_size or 0)
             blocking = action.state in {
                 MigrationState.CONFLICT,
                 MigrationState.MANUAL_ACTION,
             }
-            blocking_conflicts += int(blocking)
-            if preview_counts.get(kind, 0) < PLAN_PREVIEW_PER_KIND:
-                rows.append(
-                    {
-                        "id": action.id,
-                        "kind": kind,
-                        "action": kind.lower(),
-                        "relative_path": action.source_rel_path or action.previous_rel_path,
-                        "previous_path": action.previous_rel_path or None,
-                        "reason": action.reason,
-                        "bytes": size,
-                        "size": size,
-                        "blocking": blocking,
-                        "status": action.state.value,
-                    }
-                )
-                preview_counts[kind] = preview_counts.get(kind, 0) + 1
-        confirmed = all(
-            bool((action.details or {}).get("plan_confirmed"))
-            for action in actions
-            if action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}
+            rows.append(
+                {
+                    "id": action.id,
+                    "kind": kind,
+                    "action": kind.lower(),
+                    "relative_path": action.source_rel_path or action.previous_rel_path,
+                    "previous_path": action.previous_rel_path or None,
+                    "reason": action.reason,
+                    "bytes": size,
+                    "size": size,
+                    "blocking": blocking,
+                    "status": action.state.value,
+                }
+            )
+        counts = dashboard["counts"]
+        total_actions = int(dashboard["total"])
+        writable_actions = (
+            total_actions
+            - counts.get(ActionType.SKIP.value, 0)
+            - counts.get(ActionType.REPORT_MISSING.value, 0)
         )
+        blocking_conflicts = dashboard["states"].get(MigrationState.CONFLICT.value, 0) + dashboard[
+            "states"
+        ].get(MigrationState.MANUAL_ACTION.value, 0)
         return {
-            "id": actions[0].plan_id,
-            "plan_id": actions[0].plan_id,
-            "created_at": actions[0].created_at.isoformat(),
+            "id": plan_id,
+            "plan_id": plan_id,
+            "created_at": first.created_at.isoformat(),
             "counts": counts,
             "actions": rows,
             "items": rows,
-            "total_actions": len(actions),
+            "total_actions": total_actions,
             "writable_actions": writable_actions,
-            "estimated_upload_calls": upload_calls,
+            "estimated_upload_calls": dashboard["upload_calls"],
             "estimated_days": 0,
-            "confirmed": confirmed,
+            "confirmed": dashboard["unconfirmed"] == 0,
             "blocking_conflicts": blocking_conflicts,
             "preview_limit_per_kind": PLAN_PREVIEW_PER_KIND,
         }
 
     def confirm_latest_plan(self, project_id: str) -> dict[str, Any]:
-        actions = self.store.list_plan_actions(project_id)
-        if not actions:
+        plan_id = self.store.latest_plan_id(project_id)
+        if not plan_id:
             raise ValueError("尚未生成迁移计划")
-        if any(
-            action.state in {MigrationState.CONFLICT, MigrationState.MANUAL_ACTION}
-            for action in actions
+        dashboard = self.store.plan_dashboard(project_id, plan_id, preview_limit=1)
+        if dashboard["states"].get(MigrationState.CONFLICT.value, 0) or dashboard["states"].get(
+            MigrationState.MANUAL_ACTION.value, 0
         ):
             raise ValueError("计划仍包含冲突或人工处理项")
-        self.store.confirm_plan_actions(project_id, actions[0].plan_id)
+        self.store.confirm_plan_actions(project_id, plan_id)
         self.store.append_audit(
             project_id,
             "plan.confirmed",
             "用户已最终确认当前差异计划",
-            payload={"plan_id": actions[0].plan_id},
+            payload={"plan_id": plan_id},
         )
         return self.plan_payload(project_id)
 

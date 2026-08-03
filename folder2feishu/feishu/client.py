@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import email.utils
+import logging
 import random
+import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
 
+from ..observability import METRICS
 from .errors import (
     FeishuAmbiguousWriteError,
     FeishuAPIError,
@@ -22,6 +26,7 @@ OPEN_API_BASE = "https://open.feishu.cn/open-apis"
 RETRYABLE_CODES = frozenset({1061045, 99991400, 99991401, 99991402})
 RATE_LIMIT_RETRYABLE_CODES = frozenset({1061045})
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+LOGGER = logging.getLogger(__name__)
 
 
 class UserAccessTokenProvider(Protocol):
@@ -78,7 +83,12 @@ class FeishuAPIClient:
             raise ValueError("max_attempts must be positive")
         self._token_provider = token_provider
         self.client = client or httpx.Client(
-            timeout=httpx.Timeout(120, connect=20),
+            timeout=httpx.Timeout(connect=10, read=45, write=120, pool=5),
+            limits=httpx.Limits(
+                max_connections=8,
+                max_keepalive_connections=4,
+                keepalive_expiry=30,
+            ),
             follow_redirects=False,
         )
         self.base_url = base_url.rstrip("/")
@@ -88,9 +98,26 @@ class FeishuAPIClient:
         self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.max_delay = max_delay
+        self._local = threading.local()
 
     def close(self) -> None:
         self.client.close()
+
+    @contextmanager
+    def interruptible(self, waiter: Callable[[float], None]):
+        previous = getattr(self._local, "waiter", None)
+        self._local.waiter = waiter
+        try:
+            yield
+        finally:
+            self._local.waiter = previous
+
+    def wait(self, seconds: float) -> None:
+        waiter = getattr(self._local, "waiter", None)
+        if waiter is not None:
+            waiter(seconds)
+        else:
+            self._sleep(seconds)
 
     def request(
         self,
@@ -136,6 +163,8 @@ class FeishuAPIClient:
                 "Accept": "application/json",
                 **supplied_headers,
             }
+            started = time.perf_counter()
+            METRICS.http_started()
             try:
                 response = self.client.request(
                     method,
@@ -143,10 +172,35 @@ class FeishuAPIClient:
                     headers=request_headers,
                     **kwargs,
                 )
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
+            except httpx.TimeoutException as exc:
+                duration = time.perf_counter() - started
+                METRICS.http_finished(duration, error=True, timeout=True)
                 last_error = exc
                 if retry_mode == RetryMode.ALWAYS and attempt < self.max_attempts:
-                    self._sleep(self._backoff(attempt, None))
+                    METRICS.http_retried()
+                    LOGGER.warning(
+                        "Feishu request timeout; retrying",
+                        extra={
+                            "path": path,
+                            "duration_ms": round(duration * 1000, 2),
+                            "retry_count": attempt,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    self.wait(self._backoff(attempt, None))
+                    continue
+                if method not in SAFE_METHODS:
+                    raise FeishuAmbiguousWriteError(
+                        "Feishu write outcome is unknown; reconcile remote state before retrying"
+                    ) from exc
+                raise FeishuTransportError("unable to reach Feishu OpenAPI") from exc
+            except httpx.TransportError as exc:
+                duration = time.perf_counter() - started
+                METRICS.http_finished(duration, error=True)
+                last_error = exc
+                if retry_mode == RetryMode.ALWAYS and attempt < self.max_attempts:
+                    METRICS.http_retried()
+                    self.wait(self._backoff(attempt, None))
                     continue
                 if method not in SAFE_METHODS:
                     raise FeishuAmbiguousWriteError(
@@ -156,8 +210,10 @@ class FeishuAPIClient:
 
             try:
                 body = self._decode(response)
+                METRICS.http_finished(time.perf_counter() - started)
                 return body
             except FeishuProtocolError as exc:
+                METRICS.http_finished(time.perf_counter() - started, error=True)
                 if (
                     retry_mode == RetryMode.RATE_LIMIT
                     and method not in SAFE_METHODS
@@ -169,6 +225,7 @@ class FeishuAPIClient:
                     ) from exc
                 raise
             except FeishuAPIError as exc:
+                METRICS.http_finished(time.perf_counter() - started, error=True)
                 last_error = exc
                 can_retry_server = (
                     retry_mode
@@ -183,7 +240,8 @@ class FeishuAPIClient:
                     exc.status_code == 429 or exc.code in RATE_LIMIT_RETRYABLE_CODES
                 )
                 if (can_retry_server or can_retry_rate_limit) and attempt < self.max_attempts:
-                    self._sleep(self._backoff(attempt, response))
+                    METRICS.http_retried()
+                    self.wait(self._backoff(attempt, response))
                     continue
                 if (
                     retry_mode == RetryMode.RATE_LIMIT

@@ -2,7 +2,7 @@
 param([switch]$Quiet)
 
 $ErrorActionPreference = "Stop"
-$stateDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuWiki"
+$stateDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
 $pidFile = Join-Path $stateDir "server.pid"
 
 if (-not (Test-Path -LiteralPath $pidFile)) {

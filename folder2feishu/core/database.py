@@ -9,15 +9,30 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
-from sqlalchemy import Engine, create_engine, delete, event, func, inspect, select, text
+from sqlalchemy import (
+    Engine,
+    case,
+    create_engine,
+    delete,
+    event,
+    func,
+    inspect,
+    or_,
+    select,
+    text,
+    true,
+    update,
+)
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from .enums import (
+    ActionType,
     AuditLevel,
     ItemKind,
+    MigrationState,
     RemoteStatus,
     RunStatus,
     RunType,
@@ -138,10 +153,56 @@ class CoreStore:
 
     @staticmethod
     def _migrate(session: Session, current: int, target: int) -> None:
-        # v1 is the first clean-room schema.  The explicit gate is kept here so
-        # future versions add ordered, transactional migrations instead of
-        # silently relying on create_all.
-        if current != target:
+        version = current
+        if version == 1 and target >= 2:
+            # SQLite cannot add several columns in one ALTER statement. Keep
+            # every addition backward-compatible and give existing rows safe
+            # defaults so an interrupted upgrade can be retried.
+            additions = (
+                "ALTER TABLE job_runs ADD COLUMN current_stage VARCHAR(80) NOT NULL DEFAULT 'QUEUED'",
+                "ALTER TABLE job_runs ADD COLUMN current_item TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN last_message TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE job_runs ADD COLUMN bytes_total BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN bytes_completed BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN pause_requested BOOLEAN NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0",
+                "ALTER TABLE job_runs ADD COLUMN heartbeat_at DATETIME",
+            )
+            for statement in additions:
+                session.execute(text(statement))
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_job_runs_status_heartbeat "
+                    "ON job_runs (status, heartbeat_at)"
+                )
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_inventory_project_parent_present "
+                    "ON inventory_items "
+                    "(project_id, parent_rel_path, present, kind, name)"
+                )
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_actions_plan_state_order "
+                    "ON planned_actions (project_id, plan_id, state, order_index)"
+                )
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_actions_project_created "
+                    "ON planned_actions (project_id, created_at)"
+                )
+            )
+            session.execute(
+                text(
+                    "UPDATE schema_version SET version = 2, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1"
+                )
+            )
+            version = 2
+        if version != target:
             raise SchemaVersionError(f"no migration path from schema {current} to {target}")
 
     @contextmanager
@@ -281,7 +342,11 @@ class CoreStore:
                 row.setdefault("discovered_at", now)
                 row["updated_at"] = now
                 prepared.append(row)
-            statement = sqlite_insert(InventoryItem).values(prepared)
+            # Pass rows as executemany parameters instead of compiling one
+            # enormous multi-value INSERT.  Apart from avoiding SQLite's
+            # variable limit, this is materially faster for large inventories
+            # on Windows because SQLAlchemy can reuse the same statement.
+            statement = sqlite_insert(InventoryItem)
             excluded = statement.excluded
             statement = statement.on_conflict_do_update(
                 index_elements=["project_id", "rel_path"],
@@ -304,7 +369,7 @@ class CoreStore:
                     "updated_at": now,
                 },
             )
-            session.execute(statement)
+            session.execute(statement, prepared)
         return len(prepared)
 
     def list_inventory(
@@ -336,7 +401,7 @@ class CoreStore:
         if not prepared:
             return 0
         with self.session() as session:
-            session.execute(sqlite_insert(ScanIssue).values(prepared))
+            session.execute(sqlite_insert(ScanIssue), prepared)
         return len(prepared)
 
     def list_issues(
@@ -379,6 +444,130 @@ class CoreStore:
         issues = {severity.value.lower(): count for severity, count in issue_rows}
         return {"items": items, "issues": issues}
 
+    def inventory_dashboard_summary(
+        self, project_id: str, *, scan_id: str | None
+    ) -> dict[str, Any]:
+        """Return inventory counters without materializing the complete ORM inventory."""
+
+        present = InventoryItem.present.is_(True)
+        is_file = InventoryItem.kind == ItemKind.FILE
+        with self.session() as session:
+            row = session.execute(
+                select(
+                    func.sum(case((is_file, 1), else_=0)),
+                    func.sum(case((InventoryItem.kind == ItemKind.FOLDER, 1), else_=0)),
+                    func.coalesce(func.sum(case((is_file, InventoryItem.size), else_=0)), 0),
+                    func.sum(case((is_file & (InventoryItem.size == 0), 1), else_=0)),
+                    func.sum(
+                        case(
+                            (
+                                InventoryItem.is_offline
+                                | InventoryItem.is_recall_on_open
+                                | InventoryItem.is_recall_on_data_access,
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    func.coalesce(func.max(InventoryItem.depth), 0),
+                ).where(InventoryItem.project_id == project_id, present)
+            ).one()
+            sibling_counts = (
+                select(func.count(InventoryItem.id).label("count"))
+                .where(InventoryItem.project_id == project_id, present)
+                .group_by(InventoryItem.parent_rel_path)
+                .subquery()
+            )
+            max_siblings = session.scalar(
+                select(func.coalesce(func.max(sibling_counts.c.count), 0))
+            )
+            issue_rows = session.execute(
+                select(ScanIssue.code, func.count(ScanIssue.id))
+                .where(
+                    ScanIssue.project_id == project_id,
+                    ScanIssue.scan_id == scan_id if scan_id else text("1=1"),
+                )
+                .group_by(ScanIssue.code)
+            ).all()
+            size_rows = session.scalars(
+                select(InventoryItem.size).where(
+                    InventoryItem.project_id == project_id,
+                    present,
+                    is_file,
+                    InventoryItem.size > 0,
+                )
+            )
+            upload_calls = 0
+            for size in size_rows:
+                value = int(size or 0)
+                upload_calls += (
+                    1
+                    if value <= 20 * 1024 * 1024
+                    else 2 + (value + 4 * 1024 * 1024 - 1) // (4 * 1024 * 1024)
+                )
+        issue_counts = {code.value: int(count) for code, count in issue_rows}
+        return {
+            "files": int(row[0] or 0),
+            "folders": int(row[1] or 0),
+            "bytes": int(row[2] or 0),
+            "empty_files": int(row[3] or 0),
+            "placeholders": int(row[4] or 0),
+            "max_depth": int(row[5] or 0),
+            "max_siblings": int(max_siblings or 0),
+            "too_long_names": issue_counts.get("NAME_TOO_LONG", 0),
+            "unreadable": sum(
+                issue_counts.get(code, 0)
+                for code in ("STAT_ERROR", "HASH_ERROR", "ENUMERATION_ERROR")
+            ),
+            "upload_calls": upload_calls,
+        }
+
+    def list_inventory_children(
+        self,
+        project_id: str,
+        *,
+        parent_rel_path: str | None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> tuple[list[InventoryItem], int]:
+        limit = min(max(int(limit), 1), 500)
+        offset = max(int(offset), 0)
+        filters = (
+            InventoryItem.project_id == project_id,
+            InventoryItem.present.is_(True),
+            InventoryItem.parent_rel_path.is_(None)
+            if parent_rel_path is None
+            else InventoryItem.parent_rel_path == parent_rel_path,
+        )
+        with self.session() as session:
+            total = int(session.scalar(select(func.count(InventoryItem.id)).where(*filters)) or 0)
+            rows = list(
+                session.scalars(
+                    select(InventoryItem)
+                    .where(*filters)
+                    .order_by(InventoryItem.kind, InventoryItem.name)
+                    .offset(offset)
+                    .limit(limit)
+                )
+            )
+        return rows, total
+
+    def inventory_child_counts(self, project_id: str, parents: Iterable[str]) -> dict[str, int]:
+        values = tuple(dict.fromkeys(parents))
+        if not values:
+            return {}
+        with self.session() as session:
+            rows = session.execute(
+                select(InventoryItem.parent_rel_path, func.count(InventoryItem.id))
+                .where(
+                    InventoryItem.project_id == project_id,
+                    InventoryItem.present.is_(True),
+                    InventoryItem.parent_rel_path.in_(values),
+                )
+                .group_by(InventoryItem.parent_rel_path)
+            ).all()
+        return {str(parent): int(count) for parent, count in rows}
+
     # Plans
     def save_plan(
         self,
@@ -397,6 +586,36 @@ class CoreStore:
         with self.session() as session:
             session.add_all(objects)
         return objects
+
+    def save_plan_bulk(
+        self,
+        project_id: str,
+        plan_id: str,
+        actions: Iterable[Mapping[str, Any]],
+        *,
+        batch_size: int = 1_000,
+    ) -> int:
+        """Persist a large immutable plan in bounded batches and one transaction."""
+
+        batch_size = min(max(int(batch_size), 100), 5_000)
+        pending: list[dict[str, Any]] = []
+        inserted = 0
+        with self.session() as session:
+            for index, source in enumerate(actions):
+                values = dict(source)
+                values.setdefault("id", new_id())
+                values["project_id"] = project_id
+                values["plan_id"] = plan_id
+                values.setdefault("order_index", index)
+                pending.append(values)
+                if len(pending) >= batch_size:
+                    session.execute(sqlite_insert(PlannedAction), pending)
+                    inserted += len(pending)
+                    pending.clear()
+            if pending:
+                session.execute(sqlite_insert(PlannedAction), pending)
+                inserted += len(pending)
+        return inserted
 
     def list_plan_actions(
         self, project_id: str, *, plan_id: str | None = None
@@ -422,6 +641,170 @@ class CoreStore:
                 )
             )
 
+    def plan_run_summary(self, project_id: str, plan_id: str) -> dict[str, int]:
+        with self.session() as session:
+            row = session.execute(
+                select(
+                    func.count(PlannedAction.id),
+                    func.coalesce(func.sum(InventoryItem.size), 0),
+                )
+                .select_from(PlannedAction)
+                .outerjoin(InventoryItem, InventoryItem.id == PlannedAction.inventory_item_id)
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+            ).one()
+        return {"total": int(row[0] or 0), "bytes_total": int(row[1] or 0)}
+
+    def plan_execution_guard(self, project_id: str, plan_id: str) -> dict[str, int]:
+        """Return the small set of counts needed before starting a writer task."""
+
+        with self.session() as session:
+            total = int(
+                session.scalar(
+                    select(func.count(PlannedAction.id)).where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                    )
+                )
+                or 0
+            )
+            blocking = int(
+                session.scalar(
+                    select(func.count(PlannedAction.id)).where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                        PlannedAction.state.in_(
+                            (MigrationState.CONFLICT, MigrationState.MANUAL_ACTION)
+                        ),
+                    )
+                )
+                or 0
+            )
+            unconfirmed = int(
+                session.scalar(
+                    select(func.count(PlannedAction.id)).where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                        PlannedAction.action_type.notin_(
+                            (ActionType.SKIP, ActionType.REPORT_MISSING)
+                        ),
+                        func.coalesce(
+                            func.json_extract(PlannedAction.details, "$.plan_confirmed"),
+                            0,
+                        )
+                        != 1,
+                    )
+                )
+                or 0
+            )
+        return {"total": total, "blocking": blocking, "unconfirmed": unconfirmed}
+
+    def plan_execution_counters(self, project_id: str, plan_id: str) -> dict[str, int]:
+        """Recover durable counters without loading a complete plan into memory."""
+
+        done = MigrationState.DONE
+        with self.session() as session:
+            row = session.execute(
+                select(
+                    func.coalesce(
+                        func.sum(case((PlannedAction.state == done, 1), else_=0)),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (
+                                        (PlannedAction.state == done)
+                                        & PlannedAction.action_type.in_(
+                                            (ActionType.SKIP, ActionType.REPORT_MISSING)
+                                        )
+                                    ),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (PlannedAction.state == done, InventoryItem.size),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ),
+                )
+                .select_from(PlannedAction)
+                .outerjoin(InventoryItem, InventoryItem.id == PlannedAction.inventory_item_id)
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+            ).one()
+        return {
+            "completed": int(row[0] or 0),
+            "skipped": int(row[1] or 0),
+            "bytes_completed": int(row[2] or 0),
+        }
+
+    def get_inventory_items(self, item_ids: Iterable[str]) -> dict[str, InventoryItem]:
+        ids = list(dict.fromkeys(value for value in item_ids if value))
+        if not ids:
+            return {}
+        with self.session() as session:
+            rows = session.scalars(select(InventoryItem).where(InventoryItem.id.in_(ids)))
+            return {row.id: row for row in rows}
+
+    def list_plan_actions_batch(
+        self,
+        project_id: str,
+        plan_id: str,
+        *,
+        after_order: int = -1,
+        limit: int = 200,
+    ) -> list[PlannedAction]:
+        with self.session() as session:
+            return list(
+                session.scalars(
+                    select(PlannedAction)
+                    .where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                        PlannedAction.order_index > after_order,
+                    )
+                    .order_by(PlannedAction.order_index)
+                    .limit(min(max(int(limit), 1), 1_000))
+                )
+            )
+
+    def list_plan_action_statuses(
+        self,
+        project_id: str,
+        *,
+        plan_id: str | None = None,
+        limit: int = 500,
+    ) -> list[PlannedAction]:
+        plan_id = plan_id or self.latest_plan_id(project_id)
+        if not plan_id:
+            return []
+        with self.session() as session:
+            return list(
+                session.scalars(
+                    select(PlannedAction)
+                    .where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                    )
+                    .order_by(PlannedAction.updated_at.desc())
+                    .limit(min(max(int(limit), 1), 2_000))
+                )
+            )
+
     def get_plan_action(self, action_id: str) -> PlannedAction:
         with self.session() as session:
             action = session.get(PlannedAction, action_id)
@@ -433,22 +816,126 @@ class CoreStore:
         """Mark one complete plan as confirmed in a single transaction."""
 
         with self.session() as session:
-            actions = list(
-                session.scalars(
-                    select(PlannedAction).where(
-                        PlannedAction.project_id == project_id,
-                        PlannedAction.plan_id == plan_id,
-                    )
+            result = session.execute(
+                update(PlannedAction)
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+                .values(
+                    details=func.json_set(
+                        func.coalesce(PlannedAction.details, "{}"),
+                        "$.plan_confirmed",
+                        True,
+                    ),
+                    updated_at=utc_now(),
                 )
             )
-            for action in actions:
-                action.details = {
-                    **(action.details or {}),
-                    "plan_confirmed": True,
-                }
-                action.updated_at = utc_now()
-            session.flush()
-            return len(actions)
+            return int(getattr(result, "rowcount", 0) or 0)
+
+    def latest_plan_id(self, project_id: str) -> str | None:
+        with self.session() as session:
+            return session.scalar(
+                select(PlannedAction.plan_id)
+                .where(PlannedAction.project_id == project_id)
+                .order_by(PlannedAction.created_at.desc())
+                .limit(1)
+            )
+
+    def plan_dashboard(
+        self, project_id: str, plan_id: str, *, preview_limit: int
+    ) -> dict[str, Any]:
+        with self.session() as session:
+            grouped = session.execute(
+                select(PlannedAction.action_type, func.count(PlannedAction.id))
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+                .group_by(PlannedAction.action_type)
+            ).all()
+            state_rows = session.execute(
+                select(PlannedAction.state, func.count(PlannedAction.id))
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+                .group_by(PlannedAction.state)
+            ).all()
+            unconfirmed = int(
+                session.scalar(
+                    select(func.count(PlannedAction.id)).where(
+                        PlannedAction.project_id == project_id,
+                        PlannedAction.plan_id == plan_id,
+                        PlannedAction.action_type.notin_(
+                            (ActionType.SKIP, ActionType.REPORT_MISSING)
+                        ),
+                        func.coalesce(
+                            func.json_extract(PlannedAction.details, "$.plan_confirmed"),
+                            0,
+                        )
+                        != 1,
+                    )
+                )
+                or 0
+            )
+            first = session.scalar(
+                select(PlannedAction)
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                )
+                .order_by(PlannedAction.order_index)
+                .limit(1)
+            )
+            previews: list[tuple[PlannedAction, int]] = []
+            for action_type, _ in grouped:
+                previews.extend(
+                    (action, int(size))
+                    for action, size in session.execute(
+                        select(PlannedAction, func.coalesce(InventoryItem.size, 0))
+                        .outerjoin(
+                            InventoryItem,
+                            InventoryItem.id == PlannedAction.inventory_item_id,
+                        )
+                        .where(
+                            PlannedAction.project_id == project_id,
+                            PlannedAction.plan_id == plan_id,
+                            PlannedAction.action_type == action_type,
+                        )
+                        .order_by(PlannedAction.order_index)
+                        .limit(preview_limit)
+                    )
+                )
+            upload_sizes = session.scalars(
+                select(InventoryItem.size)
+                .join(PlannedAction, PlannedAction.inventory_item_id == InventoryItem.id)
+                .where(
+                    PlannedAction.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                    PlannedAction.action_type.in_((ActionType.UPLOAD, ActionType.VERSION_UPDATE)),
+                )
+            )
+            upload_calls = 0
+            for size in upload_sizes:
+                value = int(size or 0)
+                if value:
+                    upload_calls += (
+                        1
+                        if value <= 20 * 1024 * 1024
+                        else 2 + (value + 4 * 1024 * 1024 - 1) // (4 * 1024 * 1024)
+                    )
+        counts = {kind.value: int(count) for kind, count in grouped}
+        states = {state.value: int(count) for state, count in state_rows}
+        return {
+            "first": first,
+            "counts": counts,
+            "states": states,
+            "unconfirmed": unconfirmed,
+            "previews": previews,
+            "upload_calls": upload_calls,
+            "total": sum(counts.values()),
+        }
 
     def update_plan_action(
         self,
@@ -565,6 +1052,33 @@ class CoreStore:
         with self.session() as session:
             return list(session.scalars(statement))
 
+    def count_remote_mappings(self, project_id: str, *, current_only: bool = True) -> int:
+        statement = select(func.count(RemoteMapping.id)).where(
+            RemoteMapping.project_id == project_id
+        )
+        if current_only:
+            statement = statement.where(RemoteMapping.is_current.is_(True))
+        with self.session() as session:
+            return int(session.scalar(statement) or 0)
+
+    def list_remote_mappings_batch(
+        self,
+        project_id: str,
+        *,
+        after_id: str = "",
+        current_only: bool = True,
+        limit: int = 200,
+    ) -> list[RemoteMapping]:
+        statement = select(RemoteMapping).where(
+            RemoteMapping.project_id == project_id,
+            RemoteMapping.id > after_id,
+        )
+        if current_only:
+            statement = statement.where(RemoteMapping.is_current.is_(True))
+        statement = statement.order_by(RemoteMapping.id).limit(min(max(int(limit), 1), 1_000))
+        with self.session() as session:
+            return list(session.scalars(statement))
+
     # Multipart upload sessions
     def upsert_upload_session(self, **values: Any) -> UploadSession:
         upload_id = values.get("upload_id")
@@ -665,13 +1179,22 @@ class CoreStore:
         status: RunStatus = RunStatus.QUEUED,
         scan_id: str | None = None,
         plan_id: str | None = None,
+        run_id: str | None = None,
+        total_items: int = 0,
+        bytes_total: int = 0,
+        current_stage: str = "QUEUED",
     ) -> JobRun:
         run = JobRun(
+            id=run_id or new_id(),
             project_id=project_id,
             run_type=run_type,
             status=status,
             scan_id=scan_id,
             plan_id=plan_id,
+            total_items=total_items,
+            bytes_total=bytes_total,
+            current_stage=current_stage,
+            heartbeat_at=utc_now(),
             started_at=utc_now() if status == RunStatus.RUNNING else None,
         )
         with self.session() as session:
@@ -687,6 +1210,15 @@ class CoreStore:
             "completed_items",
             "failed_items",
             "skipped_items",
+            "current_stage",
+            "current_item",
+            "last_message",
+            "bytes_total",
+            "bytes_completed",
+            "retry_count",
+            "pause_requested",
+            "cancel_requested",
+            "heartbeat_at",
             "summary",
             "error",
             "started_at",
@@ -703,6 +1235,55 @@ class CoreStore:
                 setattr(run, key, value)
             session.flush()
             return run
+
+    def find_active_job_run(self, project_id: str, run_type: RunType) -> JobRun | None:
+        with self.session() as session:
+            return session.scalar(
+                select(JobRun)
+                .where(
+                    JobRun.project_id == project_id,
+                    JobRun.run_type == run_type,
+                    JobRun.status.in_((RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.PAUSED)),
+                )
+                .order_by(JobRun.created_at.desc())
+                .limit(1)
+            )
+
+    def job_status_counts(self) -> dict[str, int]:
+        with self.session() as session:
+            rows = session.execute(
+                select(JobRun.status, func.count(JobRun.id)).group_by(JobRun.status)
+            ).all()
+        return {status.value: int(count) for status, count in rows}
+
+    def interrupt_orphaned_job_runs(self, *, stale_after_seconds: int = 30) -> int:
+        """Convert process-owned work into a recoverable state on service startup."""
+
+        now = utc_now()
+        stale_after_seconds = max(0, int(stale_after_seconds))
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        with self.session() as session:
+            stale_filter = (
+                true()
+                if stale_after_seconds == 0
+                else or_(JobRun.heartbeat_at.is_(None), JobRun.heartbeat_at < cutoff)
+            )
+            runs = list(
+                session.scalars(
+                    select(JobRun).where(
+                        JobRun.status.in_((RunStatus.QUEUED, RunStatus.RUNNING)),
+                        stale_filter,
+                    )
+                )
+            )
+            for run in runs:
+                run.status = RunStatus.INTERRUPTED
+                run.current_stage = "INTERRUPTED"
+                run.last_message = "本机服务曾在任务完成前停止，可从已落库断点继续"
+                run.heartbeat_at = now
+                run.finished_at = now
+            session.flush()
+            return len(runs)
 
     def get_job_run(self, run_id: str) -> JobRun:
         with self.session() as session:
@@ -750,13 +1331,26 @@ class CoreStore:
             session.add(entry)
         return entry
 
-    def list_audit(self, project_id: str, *, job_run_id: str | None = None) -> list[AuditEvent]:
+    def list_audit(
+        self,
+        project_id: str,
+        *,
+        job_run_id: str | None = None,
+        after_id: int | None = None,
+        limit: int | None = None,
+        latest: bool = False,
+    ) -> list[AuditEvent]:
         statement = select(AuditEvent).where(AuditEvent.project_id == project_id)
         if job_run_id:
             statement = statement.where(AuditEvent.job_run_id == job_run_id)
-        statement = statement.order_by(AuditEvent.id)
+        if after_id is not None:
+            statement = statement.where(AuditEvent.id > after_id)
+        statement = statement.order_by(AuditEvent.id.desc() if latest else AuditEvent.id)
+        if limit is not None:
+            statement = statement.limit(min(max(int(limit), 1), 2_000))
         with self.session() as session:
-            return list(session.scalars(statement))
+            rows = list(session.scalars(statement))
+        return list(reversed(rows)) if latest else rows
 
     # Single-writer project leases
     def acquire_lease(

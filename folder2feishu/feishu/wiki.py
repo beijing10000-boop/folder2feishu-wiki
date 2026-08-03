@@ -71,7 +71,7 @@ class WikiService:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.api = api
-        self._sleep = sleeper
+        self._sleep = api.wait if sleeper is time.sleep else sleeper
         self._monotonic = monotonic
 
     def get_node(self, node_token: str, *, obj_type: str = "wiki") -> dict[str, Any]:

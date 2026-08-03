@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -103,6 +104,7 @@ class _ProjectLeaseHeartbeat:
         project_id: str,
         owner_id: str,
         *,
+        run_id: str | None = None,
         ttl_seconds: int = PROJECT_LEASE_TTL_SECONDS,
         interval_seconds: float = PROJECT_LEASE_HEARTBEAT_SECONDS,
     ) -> None:
@@ -111,6 +113,7 @@ class _ProjectLeaseHeartbeat:
         self.store = store
         self.project_id = project_id
         self.owner_id = owner_id
+        self.run_id = run_id
         self.ttl_seconds = ttl_seconds
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
@@ -125,6 +128,8 @@ class _ProjectLeaseHeartbeat:
             self.owner_id,
             ttl_seconds=self.ttl_seconds,
         )
+        if self.run_id:
+            self.store.update_job_run(self.run_id, heartbeat_at=utc_now())
         self._thread = threading.Thread(
             target=self._run,
             name=f"folder2feishu-lease-{self.project_id[:8]}",
@@ -157,6 +162,8 @@ class _ProjectLeaseHeartbeat:
                     self.owner_id,
                     ttl_seconds=self.ttl_seconds,
                 )
+                if self.run_id:
+                    self.store.update_job_run(self.run_id, heartbeat_at=utc_now())
             except BaseException as exc:
                 with self._failure_lock:
                     self._failure = exc
@@ -189,6 +196,7 @@ class MigrationExecutor:
     ) -> ExecutionResult:
         project = self.store.get_project(project_id)
         _assert_fixed_oauth_identity(project, self.drive)
+        plan_id: str | None
         if run_id:
             durable_run = self.store.get_job_run(run_id)
             if durable_run.project_id != project_id:
@@ -197,31 +205,19 @@ class MigrationExecutor:
                 raise MigrationBlocked("运行记录不是迁移任务")
             if not durable_run.plan_id:
                 raise MigrationBlocked("运行记录缺少已确认的 plan_id")
-            actions = self.store.list_plan_actions(
-                project_id,
-                plan_id=durable_run.plan_id,
-            )
+            plan_id = str(durable_run.plan_id)
         else:
-            actions = self.store.list_plan_actions(project_id)
             durable_run = None
-        if not actions:
+            plan_id = self.store.latest_plan_id(project_id)
+        if not plan_id:
             raise MigrationBlocked("运行绑定的迁移计划不存在")
-        writable = [
-            action
-            for action in actions
-            if action.action_type not in {ActionType.SKIP, ActionType.REPORT_MISSING}
-        ]
-        if writable and not all(
-            bool((action.details or {}).get("plan_confirmed")) for action in writable
-        ):
+        guard = self.store.plan_execution_guard(project_id, plan_id)
+        if guard["total"] <= 0:
+            raise MigrationBlocked("运行绑定的迁移计划不存在")
+        if guard["unconfirmed"]:
             raise MigrationBlocked("当前差异计划尚未最终确认")
-        blocking = [
-            action
-            for action in actions
-            if action.state in {MigrationState.CONFLICT, MigrationState.MANUAL_ACTION}
-        ]
-        if blocking:
-            raise MigrationBlocked(f"计划包含 {len(blocking)} 个冲突或人工处理项")
+        if guard["blocking"]:
+            raise MigrationBlocked(f"计划包含 {guard['blocking']} 个冲突或人工处理项")
         if not project.target_space_id or not project.target_parent_node_token:
             raise MigrationBlocked("目标知识库尚未通过预检")
 
@@ -231,18 +227,26 @@ class MigrationExecutor:
                 RunType.MIGRATION,
                 status=RunStatus.RUNNING,
                 scan_id=project.current_scan_id,
-                plan_id=actions[0].plan_id,
+                plan_id=plan_id,
             )
         run_id = durable_run.id
         owner_id = f"{run_id}:{uuid.uuid4().hex}"
-        lease = _ProjectLeaseHeartbeat(self.store, project_id, owner_id)
+        lease = _ProjectLeaseHeartbeat(self.store, project_id, owner_id, run_id=run_id)
         lease.start()
         try:
             self.store.update_project(project_id, status=ProjectStatus.RUNNING)
+            run_summary = self.store.plan_run_summary(project_id, plan_id)
             self.store.update_job_run(
                 run_id,
                 status=RunStatus.RUNNING,
-                total_items=len(actions),
+                total_items=run_summary["total"],
+                bytes_total=run_summary["bytes_total"],
+                current_stage="DATA_MIGRATION",
+                current_item="",
+                last_message="迁移任务已启动",
+                pause_requested=False,
+                cancel_requested=False,
+                heartbeat_at=utc_now(),
                 started_at=durable_run.started_at or utc_now(),
                 finished_at=None,
                 error="",
@@ -252,146 +256,183 @@ class MigrationExecutor:
                 "migration.started",
                 "开始执行已确认的迁移计划",
                 job_run_id=run_id,
-                payload={"plan_id": actions[0].plan_id, "total": len(actions)},
+                payload={"plan_id": plan_id, "total": run_summary["total"]},
             )
         except Exception:
             lease.close()
             raise
 
         controller = control or JobControl()
-        completed = skipped = failed = conflicts = 0
+        api = getattr(self.drive, "api", None)
+        interruptible = (
+            api.interruptible(controller.wait)
+            if api is not None and hasattr(api, "interruptible")
+            else nullcontext()
+        )
+        interruptible.__enter__()
+        counters = self.store.plan_execution_counters(project_id, plan_id)
+        completed = counters["completed"]
+        skipped = counters["skipped"]
+        bytes_completed = counters["bytes_completed"]
+        failed = conflicts = 0
         quota_paused = False
-        items = {item.id: item for item in self.store.list_inventory(project_id, present=True)}
+        total = run_summary["total"]
+        after_order = -1
 
         try:
-            for index, action in enumerate(actions):
-                controller.checkpoint()
-                lease.checkpoint()
-                action = self.store.get_plan_action(action.id)
-                if action.state == MigrationState.DONE:
-                    completed += 1
-                    if action.action_type == ActionType.SKIP:
-                        skipped += 1
-                    self._progress(progress, action, len(actions), completed, failed, skipped)
-                    continue
-                if action.action_type in {
-                    ActionType.CONFLICT,
-                    ActionType.MANUAL_ACTION,
-                }:
-                    conflicts += 1
-                    continue
-
-                item = items.get(action.inventory_item_id) if action.inventory_item_id else None
-                self._progress(
-                    progress,
-                    action,
-                    len(actions),
-                    completed,
-                    failed,
-                    skipped,
-                    current=True,
+            while True:
+                actions = self.store.list_plan_actions_batch(
+                    project_id,
+                    plan_id,
+                    after_order=after_order,
+                    limit=200,
                 )
-                try:
-                    self._execute_action(project, action, item, index=index)
-                except DailyQuotaExceeded as exc:
-                    quota_paused = True
-                    self.store.update_plan_action(
-                        action.id,
-                        state=MigrationState.PAUSED,
-                        merge_details={
-                            "quota_reset_at": exc.reset_at.isoformat(),
-                            "quota_used": exc.used,
-                        },
-                    )
-                    self.store.append_audit(
-                        project_id,
-                        "migration.quota_paused",
-                        str(exc),
-                        level=AuditLevel.WARNING,
-                        job_run_id=run_id,
-                        planned_action_id=action.id,
-                        rel_path=action.source_rel_path,
-                        payload={"reset_at": exc.reset_at.isoformat()},
-                    )
+                if not actions:
                     break
-                except MigrationBlocked as exc:
-                    conflicts += 1
-                    self.store.update_plan_action(
-                        action.id,
-                        state=MigrationState.CONFLICT,
-                        reason=str(exc),
-                    )
-                    self.store.append_audit(
-                        project_id,
-                        "migration.conflict",
-                        str(exc),
-                        level=AuditLevel.ERROR,
-                        job_run_id=run_id,
-                        planned_action_id=action.id,
-                        rel_path=action.source_rel_path,
-                    )
-                except WikiMoveTaskFailedError as exc:
-                    if exc.retryable:
-                        failed += 1
-                        state = MigrationState.RETRYABLE
-                        event_type = "migration.retryable"
-                    else:
-                        conflicts += 1
-                        state = MigrationState.MANUAL_ACTION
-                        event_type = "migration.manual_action"
-                    self.store.update_plan_action(
-                        action.id,
-                        state=state,
-                        reason=str(exc) if not exc.retryable else action.reason,
-                        merge_details={
-                            "last_error_type": type(exc).__name__,
-                            "last_error": str(exc),
-                        },
-                    )
-                    self.store.append_audit(
-                        project_id,
-                        event_type,
-                        str(exc),
-                        level=AuditLevel.ERROR,
-                        job_run_id=run_id,
-                        planned_action_id=action.id,
-                        rel_path=action.source_rel_path,
-                    )
-                except (FeishuAmbiguousWriteError, FeishuError, OSError) as exc:
-                    failed += 1
-                    self.store.update_plan_action(
-                        action.id,
-                        state=MigrationState.RETRYABLE,
-                        merge_details={
-                            "last_error_type": type(exc).__name__,
-                            "last_error": str(exc),
-                        },
-                    )
-                    self.store.append_audit(
-                        project_id,
-                        "migration.retryable",
-                        str(exc),
-                        level=AuditLevel.ERROR,
-                        job_run_id=run_id,
-                        planned_action_id=action.id,
-                        rel_path=action.source_rel_path,
-                    )
-                else:
-                    completed += 1
-                    if action.action_type in {
-                        ActionType.SKIP,
-                        ActionType.REPORT_MISSING,
-                    }:
-                        skipped += 1
-                lease.checkpoint()
-                self.store.update_job_run(
-                    run_id,
-                    completed_items=completed,
-                    failed_items=failed,
-                    skipped_items=skipped,
-                    summary={"conflicts": conflicts, "current_index": index},
+                items = self.store.get_inventory_items(
+                    action.inventory_item_id for action in actions if action.inventory_item_id
                 )
-                self._progress(progress, action, len(actions), completed, failed, skipped)
+                for action in actions:
+                    controller.checkpoint()
+                    lease.checkpoint()
+                    index = action.order_index
+                    after_order = max(after_order, index)
+                    item = items.get(action.inventory_item_id) if action.inventory_item_id else None
+                    item_bytes = int(item.size or 0) if item else 0
+                    if action.state == MigrationState.DONE:
+                        self._progress(progress, action, total, completed, failed, skipped)
+                        continue
+                    if action.action_type in {
+                        ActionType.CONFLICT,
+                        ActionType.MANUAL_ACTION,
+                    }:
+                        conflicts += 1
+                        continue
+
+                    self.store.update_job_run(
+                        run_id,
+                        current_stage=f"MIGRATING_{action.action_type.value}",
+                        current_item=action.source_rel_path or action.previous_rel_path,
+                        last_message=f"正在处理第 {index + 1:,} / {total:,} 项",
+                        heartbeat_at=utc_now(),
+                    )
+                    self._progress(
+                        progress,
+                        action,
+                        total,
+                        completed,
+                        failed,
+                        skipped,
+                        current=True,
+                    )
+                    try:
+                        self._execute_action(project, action, item, index=index)
+                    except DailyQuotaExceeded as exc:
+                        quota_paused = True
+                        self.store.update_plan_action(
+                            action.id,
+                            state=MigrationState.PAUSED,
+                            merge_details={
+                                "quota_reset_at": exc.reset_at.isoformat(),
+                                "quota_used": exc.used,
+                            },
+                        )
+                        self.store.append_audit(
+                            project_id,
+                            "migration.quota_paused",
+                            str(exc),
+                            level=AuditLevel.WARNING,
+                            job_run_id=run_id,
+                            planned_action_id=action.id,
+                            rel_path=action.source_rel_path,
+                            payload={"reset_at": exc.reset_at.isoformat()},
+                        )
+                        break
+                    except MigrationBlocked as exc:
+                        conflicts += 1
+                        self.store.update_plan_action(
+                            action.id,
+                            state=MigrationState.CONFLICT,
+                            reason=str(exc),
+                        )
+                        self.store.append_audit(
+                            project_id,
+                            "migration.conflict",
+                            str(exc),
+                            level=AuditLevel.ERROR,
+                            job_run_id=run_id,
+                            planned_action_id=action.id,
+                            rel_path=action.source_rel_path,
+                        )
+                    except WikiMoveTaskFailedError as exc:
+                        if exc.retryable:
+                            failed += 1
+                            state = MigrationState.RETRYABLE
+                            event_type = "migration.retryable"
+                        else:
+                            conflicts += 1
+                            state = MigrationState.MANUAL_ACTION
+                            event_type = "migration.manual_action"
+                        self.store.update_plan_action(
+                            action.id,
+                            state=state,
+                            reason=str(exc) if not exc.retryable else action.reason,
+                            merge_details={
+                                "last_error_type": type(exc).__name__,
+                                "last_error": str(exc),
+                            },
+                        )
+                        self.store.append_audit(
+                            project_id,
+                            event_type,
+                            str(exc),
+                            level=AuditLevel.ERROR,
+                            job_run_id=run_id,
+                            planned_action_id=action.id,
+                            rel_path=action.source_rel_path,
+                        )
+                    except (FeishuAmbiguousWriteError, FeishuError, OSError) as exc:
+                        failed += 1
+                        self.store.update_plan_action(
+                            action.id,
+                            state=MigrationState.RETRYABLE,
+                            merge_details={
+                                "last_error_type": type(exc).__name__,
+                                "last_error": str(exc),
+                            },
+                        )
+                        self.store.append_audit(
+                            project_id,
+                            "migration.retryable",
+                            str(exc),
+                            level=AuditLevel.ERROR,
+                            job_run_id=run_id,
+                            planned_action_id=action.id,
+                            rel_path=action.source_rel_path,
+                        )
+                    else:
+                        completed += 1
+                        bytes_completed += item_bytes
+                        if action.action_type in {
+                            ActionType.SKIP,
+                            ActionType.REPORT_MISSING,
+                        }:
+                            skipped += 1
+                    lease.checkpoint()
+                    self.store.update_job_run(
+                        run_id,
+                        completed_items=completed,
+                        failed_items=failed,
+                        skipped_items=skipped,
+                        bytes_completed=bytes_completed,
+                        current_item="",
+                        last_message=(f"已处理 {completed + failed + conflicts:,} / {total:,} 项"),
+                        heartbeat_at=utc_now(),
+                        summary={"conflicts": conflicts, "current_index": index},
+                    )
+                    self._progress(progress, action, total, completed, failed, skipped)
+                if quota_paused:
+                    break
 
             lease.checkpoint()
             status = (
@@ -412,7 +453,7 @@ class MigrationExecutor:
             )
             result = ExecutionResult(
                 run_id=run_id,
-                total=len(actions),
+                total=total,
                 completed=completed,
                 skipped=skipped,
                 failed=failed,
@@ -429,6 +470,13 @@ class MigrationExecutor:
                     "conflicts": conflicts,
                     "quota_paused": quota_paused,
                 },
+                bytes_completed=bytes_completed,
+                current_stage="COMPLETED" if status == RunStatus.COMPLETE else "NEEDS_ATTENTION",
+                current_item="",
+                last_message=(
+                    "迁移完成" if status == RunStatus.COMPLETE else "迁移结束，存在失败或冲突项目"
+                ),
+                heartbeat_at=utc_now(),
                 finished_at=utc_now() if status != RunStatus.PAUSED else None,
             )
             self.store.update_project(project_id, status=project_status)
@@ -456,6 +504,12 @@ class MigrationExecutor:
                 completed_items=completed,
                 failed_items=failed,
                 skipped_items=skipped,
+                bytes_completed=bytes_completed,
+                current_stage="CANCELLED",
+                current_item="",
+                last_message="任务已由用户停止",
+                cancel_requested=True,
+                heartbeat_at=utc_now(),
                 finished_at=utc_now(),
             )
             self.store.update_project(project_id, status=ProjectStatus.PAUSED)
@@ -467,12 +521,18 @@ class MigrationExecutor:
                 completed_items=completed,
                 failed_items=failed + 1,
                 skipped_items=skipped,
+                bytes_completed=bytes_completed,
+                current_stage="FAILED",
+                current_item="",
+                last_message="迁移任务发生未预期错误",
+                heartbeat_at=utc_now(),
                 error=f"{type(exc).__name__}: {exc}",
                 finished_at=utc_now(),
             )
             self.store.update_project(project_id, status=ProjectStatus.BLOCKED)
             raise
         finally:
+            interruptible.__exit__(None, None, None)
             lease.close()
 
     def _execute_action(
@@ -1008,49 +1068,117 @@ class RemoteReconciler:
         self.drive = drive
         self.wiki = wiki
 
-    def reconcile(self, project_id: str) -> ReconcileSummary:
+    def reconcile(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+        control: JobControl | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ReconcileSummary:
         project = self.store.get_project(project_id)
         _assert_fixed_oauth_identity(project, self.drive)
+        controller = control or JobControl()
         owner_id = f"reconcile:{uuid.uuid4().hex}"
-        lease = _ProjectLeaseHeartbeat(self.store, project_id, owner_id)
+        lease = _ProjectLeaseHeartbeat(
+            self.store,
+            project_id,
+            owner_id,
+            run_id=run_id,
+        )
         lease.start()
         run = None
         try:
-            mappings = self.store.list_remote_mappings(project_id, current_only=True)
+            total = self.store.count_remote_mappings(project_id, current_only=True)
             matched = missing = conflicts = 0
-            run = self.store.create_job_run(
-                project_id, RunType.RECONCILIATION, status=RunStatus.RUNNING
-            )
-            for mapping in mappings:
-                lease.checkpoint()
-                result = self.wiki.reconcile_node(
-                    mapping.wiki_node_token,
-                    expected_space_id=mapping.wiki_space_id,
-                    expected_parent_token=mapping.remote_parent_node_token,
-                    expected_title=mapping.remote_title,
-                    expected_obj_token=mapping.object_token or None,
+            if run_id:
+                run = self.store.get_job_run(run_id)
+                self.store.update_job_run(
+                    run.id,
+                    status=RunStatus.RUNNING,
+                    total_items=total,
+                    current_stage="REMOTE_RECONCILIATION",
+                    last_message="正在回读飞书知识库节点",
+                    started_at=run.started_at or utc_now(),
+                    heartbeat_at=utc_now(),
+                    finished_at=None,
                 )
-                if result.status == ReconcileStatus.MATCH:
-                    matched += 1
-                    status = RemoteStatus.ACTIVE
-                    reason = ""
-                elif result.status == ReconcileStatus.MISSING:
-                    missing += 1
-                    status = RemoteStatus.MISSING
-                    reason = "飞书节点不存在"
-                else:
-                    conflicts += 1
-                    status = RemoteStatus.CONFLICT
-                    reason = "远端差异：" + ",".join(result.differences)
-                self.store.upsert_remote_mapping(
-                    id=mapping.id,
-                    remote_status=status,
-                    conflict_reason=reason,
-                    last_verified_at=utc_now(),
+            else:
+                run = self.store.create_job_run(
+                    project_id,
+                    RunType.RECONCILIATION,
+                    status=RunStatus.RUNNING,
+                    total_items=total,
+                    current_stage="REMOTE_RECONCILIATION",
                 )
+            processed = 0
+            after_id = ""
+            while True:
+                mappings = self.store.list_remote_mappings_batch(
+                    project_id,
+                    after_id=after_id,
+                    current_only=True,
+                    limit=200,
+                )
+                if not mappings:
+                    break
+                for mapping in mappings:
+                    after_id = mapping.id
+                    controller.checkpoint()
+                    lease.checkpoint()
+                    self.store.update_job_run(
+                        run.id,
+                        current_item=mapping.last_source_rel_path,
+                        last_message=f"正在校验第 {processed + 1:,} / {total:,} 个节点",
+                        heartbeat_at=utc_now(),
+                    )
+                    result = self.wiki.reconcile_node(
+                        mapping.wiki_node_token,
+                        expected_space_id=mapping.wiki_space_id,
+                        expected_parent_token=mapping.remote_parent_node_token,
+                        expected_title=mapping.remote_title,
+                        expected_obj_token=mapping.object_token or None,
+                    )
+                    if result.status == ReconcileStatus.MATCH:
+                        matched += 1
+                        status = RemoteStatus.ACTIVE
+                        reason = ""
+                    elif result.status == ReconcileStatus.MISSING:
+                        missing += 1
+                        status = RemoteStatus.MISSING
+                        reason = "飞书节点不存在"
+                    else:
+                        conflicts += 1
+                        status = RemoteStatus.CONFLICT
+                        reason = "远端差异：" + ",".join(result.differences)
+                    self.store.upsert_remote_mapping(
+                        id=mapping.id,
+                        remote_status=status,
+                        conflict_reason=reason,
+                        last_verified_at=utc_now(),
+                    )
+                    processed += 1
+                    self.store.update_job_run(
+                        run.id,
+                        completed_items=processed,
+                        current_item="",
+                        heartbeat_at=utc_now(),
+                        summary={
+                            "matched": matched,
+                            "missing": missing,
+                            "conflicts": conflicts,
+                        },
+                    )
+                    if progress:
+                        progress(
+                            total=total,
+                            completed=processed,
+                            failed=missing + conflicts,
+                            current_item="",
+                        )
             lease.checkpoint()
             summary = ReconcileSummary(
-                checked=len(mappings),
+                checked=processed,
                 matched=matched,
                 missing=missing,
                 conflicts=conflicts,
@@ -1058,13 +1186,17 @@ class RemoteReconciler:
             self.store.update_job_run(
                 run.id,
                 status=RunStatus.COMPLETE,
-                total_items=len(mappings),
-                completed_items=len(mappings),
+                total_items=total,
+                completed_items=processed,
                 summary={
                     "matched": matched,
                     "missing": missing,
                     "conflicts": conflicts,
                 },
+                current_stage="COMPLETED",
+                current_item="",
+                last_message="远端对账完成",
+                heartbeat_at=utc_now(),
                 finished_at=utc_now(),
             )
             self.store.append_audit(
@@ -1074,18 +1206,35 @@ class RemoteReconciler:
                 level=AuditLevel.WARNING if missing or conflicts else AuditLevel.INFO,
                 job_run_id=run.id,
                 payload={
-                    "checked": len(mappings),
+                    "checked": processed,
                     "matched": matched,
                     "missing": missing,
                     "conflicts": conflicts,
                 },
             )
             return summary
+        except JobStopped:
+            if run is not None:
+                self.store.update_job_run(
+                    run.id,
+                    status=RunStatus.CANCELLED,
+                    current_stage="CANCELLED",
+                    current_item="",
+                    last_message="远端对账已由用户停止",
+                    cancel_requested=True,
+                    heartbeat_at=utc_now(),
+                    finished_at=utc_now(),
+                )
+            raise
         except Exception as exc:
             if run is not None:
                 self.store.update_job_run(
                     run.id,
                     status=RunStatus.FAILED,
+                    current_stage="FAILED",
+                    current_item="",
+                    last_message="远端对账失败",
+                    heartbeat_at=utc_now(),
                     error=f"{type(exc).__name__}: {exc}",
                     finished_at=utc_now(),
                 )

@@ -121,12 +121,20 @@ export interface TreeNode {
   kind: "folder" | "file";
   size?: number;
   status?: ItemStatus;
+  child_count?: number;
+  loading?: boolean;
   children?: TreeNode[];
 }
 
 export interface ScanResult {
   scan_id: string;
-  status?: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+  run_id?: string;
+  status?: "PENDING" | "RUNNING" | "PAUSED" | "INTERRUPTED" | "COMPLETED" | "FAILED" | "STOPPED";
+  scanned_items?: number;
+  current_path?: string;
+  stage?: string;
+  last_message?: string;
+  heartbeat_at?: string;
   summary: InventorySummary;
   checks: PreflightCheck[];
   tree: TreeNode[];
@@ -176,10 +184,17 @@ export interface QuotaState {
 export interface RunSummary {
   id: string;
   project_id: string;
-  state: "IDLE" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "STOPPED";
+  kind?: "SCAN" | "PLAN" | "MIGRATION" | "RECONCILIATION";
+  stage?: string;
+  state: "IDLE" | "RUNNING" | "PAUSED" | "INTERRUPTED" | "COMPLETED" | "FAILED" | "STOPPED";
   started_at?: string;
   finished_at?: string;
   current_path?: string;
+  last_message?: string;
+  heartbeat_at?: string;
+  elapsed_seconds?: number;
+  retry_count?: number;
+  skipped?: number;
   total: number;
   completed: number;
   failed: number;
