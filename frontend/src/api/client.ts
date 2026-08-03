@@ -225,6 +225,7 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
       raw.current_path ??
       (typeof current === "string" ? current : current?.relative_path ?? current?.path),
     last_message: raw.last_message,
+    error: raw.error,
     heartbeat_at: raw.heartbeat_at,
     elapsed_seconds: raw.elapsed_seconds,
     retry_count: raw.retry_count ?? 0,

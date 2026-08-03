@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.2/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.3/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -103,6 +103,11 @@ DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 
 正式环境升级前先点击“安全暂停”，等待当前对象完成并显示暂停后，再执行更新命令。
 升级不会重新盘点，也不会清空现有台账；重新打开后在“运行对账”页继续原任务。
+
+### 2.0.0-rc.3 本地时间显示修复
+
+- SQLite 中没有时区标记的历史 UTC 时间会先按 UTC 解析，再转换为当前 Windows/浏览器本地时间。
+- 修复右侧审计时间和差异计划生成时间少 8 小时的问题；无需修改电脑时区或历史台账。
 
 ## 飞书应用配置
 

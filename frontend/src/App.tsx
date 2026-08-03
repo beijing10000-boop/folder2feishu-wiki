@@ -64,6 +64,8 @@ import {
   downloadBlob,
   formatBytes,
   formatEta,
+  formatLocalDateTime,
+  formatLocalTime,
   formatPercent
 } from "./utils";
 
@@ -165,6 +167,7 @@ const statusLabel: Record<string, string> = {
   IDLE: "尚未运行",
   RUNNING: "正在迁移",
   PAUSED: "已暂停",
+  INTERRUPTED: "迁移已中断",
   COMPLETED: "迁移完成",
   FAILED: "运行失败",
   STOPPED: "已停止",
@@ -178,6 +181,31 @@ const statusLabel: Record<string, string> = {
   RETRYABLE: "可重试",
   CONFLICT: "人工冲突",
   MANUAL_ACTION: "人工处理"
+};
+
+const stageLabel: Record<string, string> = {
+  QUEUED: "等待后台执行",
+  PREFLIGHT: "参数与权限检查",
+  PLANNING: "生成迁移计划",
+  SCANNING: "扫描本地目录",
+  DATA_MIGRATION: "迁移文件与目录",
+  REMOTE_RECONCILIATION: "远端对账",
+  COMPLETED: "全部完成",
+  NEEDS_ATTENTION: "存在待处理项目",
+  PAUSED: "安全暂停",
+  INTERRUPTED: "服务中断",
+  CANCELLED: "用户停止",
+  FAILED: "执行失败"
+};
+
+const describeStage = (stage?: string): string => {
+  if (!stage) return "尚未记录";
+  if (stageLabel[stage]) return stageLabel[stage];
+  if (stage.startsWith("MIGRATING_")) {
+    const action = stage.slice("MIGRATING_".length) as PlannedActionKind;
+    return actionLabel[action] ? `正在${actionLabel[action]}` : "正在迁移项目";
+  }
+  return stage;
 };
 
 const emptySettings: AppSettings = {
@@ -1285,6 +1313,9 @@ function App() {
   const activeStep = steps.find((item) => item.id === step) ?? steps[0];
   const progress = run ? formatPercent(run.completed, run.total) : 0;
   const byteProgress = run ? formatPercent(run.bytes_completed, run.bytes_total) : 0;
+  const runProcessed = run
+    ? run.completed + run.failed + (run.skipped ?? 0) + run.conflicts
+    : 0;
   const blocking = preflight?.checks.filter((check) => check.blocking) ?? [];
   const filteredActions = useMemo(
     () =>
@@ -2232,7 +2263,7 @@ function App() {
                 <div>
                   <span className="eyebrow">IMMUTABLE WRITE PROPOSAL · {plan.id}</span>
                   <h2>每一项远端动作，先看清再执行</h2>
-                  <p>生成于 {new Date(plan.created_at).toLocaleString("zh-CN")} · 调用总次数不设上限</p>
+                  <p>生成于 {formatLocalDateTime(plan.created_at)} · 调用总次数不设上限</p>
                 </div>
                 <div className={`confirmation-seal ${plan.confirmed ? "is-confirmed" : ""}`}>
                   {plan.confirmed ? <BadgeCheck size={22} /> : <FileClock size={22} />}
@@ -2350,10 +2381,50 @@ function App() {
             <div className="view-stack">
               <div className={`run-marquee is-${run.state.toLowerCase()}`}>
                 <div className="run-marquee__pulse"><i /><span /></div>
-                <div>
+                <div className="run-marquee__summary">
                   <span className="eyebrow">RUN · {run.id}</span>
                   <h2>{statusLabel[run.state] ?? run.state}</h2>
-                  <p>{run.current_path ?? "当前没有正在处理的文件"}</p>
+                  <p className="run-marquee__message">
+                    {run.error || run.last_message || run.current_path || "当前没有正在处理的文件"}
+                  </p>
+                  <dl className="run-status-grid" aria-label="迁移任务详细状态">
+                    <div>
+                      <dt>后台任务</dt>
+                      <dd>{run.state === "RUNNING" ? "正在运行" : "当前未运行"}</dd>
+                    </div>
+                    <div>
+                      <dt>当前阶段</dt>
+                      <dd>{describeStage(run.stage)}</dd>
+                    </div>
+                    <div>
+                      <dt>处理进度</dt>
+                      <dd>{runProcessed.toLocaleString()} / {run.total.toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt>结果</dt>
+                      <dd>成功 {run.completed.toLocaleString()} · 失败 {run.failed.toLocaleString()} · 跳过 {(run.skipped ?? 0).toLocaleString()} · 冲突 {run.conflicts.toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt>开始时间</dt>
+                      <dd>{run.started_at ? formatLocalDateTime(run.started_at) : "尚未开始"}</dd>
+                    </div>
+                    <div>
+                      <dt>已运行</dt>
+                      <dd>{formatEta(run.elapsed_seconds ?? 0)}</dd>
+                    </div>
+                    <div>
+                      <dt>最近心跳</dt>
+                      <dd>{run.heartbeat_at ? formatLocalDateTime(run.heartbeat_at) : "暂无"}</dd>
+                    </div>
+                    <div>
+                      <dt>重试次数</dt>
+                      <dd>{(run.retry_count ?? 0).toLocaleString()}</dd>
+                    </div>
+                    <div className="run-status-grid__current">
+                      <dt>当前对象</dt>
+                      <dd title={run.current_path}>{run.current_path || "无"}</dd>
+                    </div>
+                  </dl>
                 </div>
                 <div className="run-marquee__controls">
                   {run.state === "RUNNING" ? (
@@ -2458,7 +2529,7 @@ function App() {
                       {events.length ? events.map((event) => (
                         <article className={`timeline__event is-${event.level.toLowerCase()}`} key={event.id}>
                           <i />
-                          <time>{new Date(event.occurred_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                          <time>{formatLocalTime(event.occurred_at)}</time>
                           <div>
                             <span>{event.stage}</span>
                             <strong>{event.message}</strong>

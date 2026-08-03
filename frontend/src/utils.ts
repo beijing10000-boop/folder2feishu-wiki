@@ -16,6 +16,29 @@ export const formatEta = (seconds?: number): string => {
   return `${(seconds / 86400).toFixed(1)} 天`;
 };
 
+const HAS_TIMEZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+/**
+ * SQLite returns UTC timestamps without an offset on Windows.  JavaScript
+ * otherwise interprets those strings as local wall-clock time.  Normalize a
+ * missing offset to UTC, then let Intl render it in the browser/Windows local
+ * timezone.
+ */
+export const parseServerDate = (value: string): Date => {
+  const normalized = HAS_TIMEZONE.test(value) ? value : `${value}Z`;
+  return new Date(normalized);
+};
+
+export const formatLocalDateTime = (value: string): string =>
+  parseServerDate(value).toLocaleString("zh-CN");
+
+export const formatLocalTime = (value: string): string =>
+  parseServerDate(value).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+
 export const formatPercent = (done: number, total: number): number =>
   total > 0 ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : 0;
 

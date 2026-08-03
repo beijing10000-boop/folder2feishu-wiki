@@ -191,6 +191,7 @@ export interface RunSummary {
   finished_at?: string;
   current_path?: string;
   last_message?: string;
+  error?: string;
   heartbeat_at?: string;
   elapsed_seconds?: number;
   retry_count?: number;
