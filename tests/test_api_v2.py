@@ -124,6 +124,7 @@ def test_run_payload_exposes_multipart_progress_and_runtime_log_tail(tmp_path: P
         RunType.MIGRATION,
         status=RunStatus.RUNNING,
         plan_id="plan-live",
+        bytes_total=12,
     )
     services.store.update_job_run(run.id, heartbeat_at=utc_now())
     (services.paths.logs / "folder2feishu.log").write_text(
@@ -137,6 +138,9 @@ def test_run_payload_exposes_multipart_progress_and_runtime_log_tail(tmp_path: P
     try:
         with TestClient(app) as client:
             payload = client.get(f"/api/v2/runs/{run.id}").json()
+            assert payload["bytes_completed"] == 4
+            assert payload["ledger_bytes_completed"] == 0
+            assert payload["eta_basis"] == "unavailable"
             assert payload["active_uploads"][0] == {
                 "action_id": action.id,
                 "relative_path": "Training/video.mp4",

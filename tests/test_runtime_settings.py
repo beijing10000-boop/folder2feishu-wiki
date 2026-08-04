@@ -64,6 +64,37 @@ def test_legacy_default_wiki_rate_is_upgraded_but_custom_rate_is_preserved(
     assert SettingsStore(paths).load().wiki_calls_per_minute == 70
 
 
+def test_legacy_default_drive_rate_is_upgraded_but_custom_rate_is_preserved(
+    tmp_path: Path,
+) -> None:
+    paths = RuntimePaths.discover(tmp_path / "state").ensure()
+    paths.settings.write_text(
+        json.dumps(
+            {
+                "app_id": "cli_example",
+                "upload_qps": 4,
+                "runtime_tuning_version": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    upgraded = SettingsStore(paths).load()
+    assert upgraded.upload_qps == 5
+    assert upgraded.runtime_tuning_version == 3
+
+    paths.settings.write_text(
+        json.dumps(
+            {
+                "app_id": "cli_example",
+                "upload_qps": 3,
+                "runtime_tuning_version": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert SettingsStore(paths).load().upload_qps == 3
+
+
 def test_settings_reject_external_bind_and_missing_scope() -> None:
     with pytest.raises(ValueError, match="127.0.0.1"):
         PublicSettings(host="0.0.0.0").validate()

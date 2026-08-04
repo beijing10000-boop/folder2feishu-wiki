@@ -42,7 +42,7 @@ let settings: AppSettings = {
     "contact:user.employee_id:readonly"
   ],
   app_secret_configured: true,
-  upload_qps: 4,
+  upload_qps: 5,
   wiki_calls_per_minute: 100,
   daily_upload_budget: 0
 };
@@ -406,7 +406,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "3.0.0-rc.2-demo",
+      version: "3.0.0-rc.3-demo",
       database: "ok"
     } as T;
   }

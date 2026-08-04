@@ -5,8 +5,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -307,7 +307,6 @@ class MigrationExecutor:
         failed = conflicts = 0
         quota_paused = False
         total = run_summary["total"]
-        after_order = -1
         last_progress_persist = 0.0
 
         try:
@@ -315,147 +314,148 @@ class MigrationExecutor:
                 max_workers=self.max_workers,
                 thread_name_prefix="folder2feishu-migrate",
             ) as workers:
-                while True:
-                    actions = self.store.list_plan_actions_batch(
-                        project_id,
-                        plan_id,
-                        after_order=after_order,
-                        limit=200,
-                    )
-                    if not actions:
-                        break
-                    items = self.store.get_inventory_items(
-                        action.inventory_item_id for action in actions if action.inventory_item_id
-                    )
-                    cursor = 0
-                    while cursor < len(actions):
-                        controller.checkpoint()
-                        lease.checkpoint()
-                        group = self._parallel_action_group(actions, cursor)
-                        cursor += len(group)
-                        runnable: list[tuple[PlannedAction, InventoryItem | None]] = []
-                        for action in group:
-                            after_order = max(after_order, action.order_index)
-                            item = (
-                                items.get(action.inventory_item_id)
-                                if action.inventory_item_id
-                                else None
-                            )
-                            if action.state == MigrationState.DONE:
-                                self._progress(
-                                    progress,
-                                    action,
-                                    total,
-                                    completed,
-                                    failed,
-                                    skipped,
-                                )
-                                continue
-                            if action.action_type in {
-                                ActionType.CONFLICT,
-                                ActionType.MANUAL_ACTION,
-                            }:
-                                conflicts += 1
-                                continue
-                            runnable.append((action, item))
+                entries = self._iter_plan_action_items(project_id, plan_id)
+                next_entry = next(entries, None)
+                group_key: tuple[str, int] | None = None
+                queue_limit = self.max_workers * MAX_QUEUED_ACTIONS_PER_WORKER
+                futures: dict[
+                    Future[_ActionOutcome],
+                    tuple[PlannedAction, InventoryItem | None],
+                ] = {}
 
-                        if not runnable:
+                while next_entry is not None or futures:
+                    controller.checkpoint()
+                    lease.checkpoint()
+                    if group_key is None and next_entry is not None:
+                        group_key = self._parallel_action_key(next_entry[0])
+
+                    while (
+                        not quota_paused
+                        and next_entry is not None
+                        and len(futures) < queue_limit
+                        and self._parallel_action_key(next_entry[0]) == group_key
+                    ):
+                        action, item = next_entry
+                        next_entry = next(entries, None)
+                        if action.state == MigrationState.DONE:
+                            self._progress(
+                                progress,
+                                action,
+                                total,
+                                completed,
+                                failed,
+                                skipped,
+                            )
+                            continue
+                        if action.action_type in {
+                            ActionType.CONFLICT,
+                            ActionType.MANUAL_ACTION,
+                        }:
+                            conflicts += 1
                             continue
 
-                        first_action = runnable[0][0]
-                        last_index = max(action.order_index for action, _item in runnable)
                         self.store.update_job_run(
                             run_id,
-                            current_stage=f"MIGRATING_{first_action.action_type.value}",
-                            current_item=(
-                                first_action.source_rel_path or first_action.previous_rel_path
-                            ),
+                            current_stage=f"MIGRATING_{action.action_type.value}",
+                            current_item=action.source_rel_path or action.previous_rel_path,
                             last_message=(
-                                f"正在并行处理第 {first_action.order_index + 1:,}–"
-                                f"{last_index + 1:,} / {total:,} 项"
-                                if len(runnable) > 1
-                                else f"正在处理第 {first_action.order_index + 1:,} / {total:,} 项"
+                                f"滑动队列正在处理第 {action.order_index + 1:,} / {total:,} 项"
                             ),
                             heartbeat_at=utc_now(),
+                            summary={
+                                "conflicts": conflicts,
+                                "current_index": action.order_index,
+                                "workers": self.max_workers,
+                                "in_flight": len(futures) + 1,
+                                "scheduler": "sliding_window",
+                            },
                         )
-                        for action, _item in runnable:
-                            self._progress(
-                                progress,
-                                action,
-                                total,
-                                completed,
-                                failed,
-                                skipped,
-                                current=True,
-                            )
+                        self._progress(
+                            progress,
+                            action,
+                            total,
+                            completed,
+                            failed,
+                            skipped,
+                            current=True,
+                        )
+                        future = workers.submit(
+                            self._execute_action_safely,
+                            project,
+                            run_id,
+                            action,
+                            item,
+                            controller,
+                        )
+                        futures[future] = (action, item)
 
-                        futures = {
-                            workers.submit(
-                                self._execute_action_safely,
-                                project,
-                                run_id,
-                                action,
-                                item,
-                                controller,
-                            ): action
-                            for action, item in runnable
-                        }
-                        pending_count = len(futures)
-                        for future in as_completed(futures):
-                            outcome = future.result()
-                            pending_count -= 1
-                            if outcome.quota_paused:
-                                quota_paused = True
-                            if not outcome.already_done:
-                                completed += int(outcome.completed)
-                                skipped += int(outcome.skipped)
-                                failed += outcome.failed
-                                conflicts += outcome.conflicts
-                                if outcome.completed:
-                                    bytes_completed += outcome.item_bytes
-                            lease.checkpoint()
-                            now = time.monotonic()
-                            if (
-                                pending_count == 0
-                                or quota_paused
-                                or now - last_progress_persist >= RUN_PROGRESS_PERSIST_SECONDS
-                            ):
-                                self.store.update_job_run(
-                                    run_id,
-                                    completed_items=completed,
-                                    failed_items=failed,
-                                    skipped_items=skipped,
-                                    bytes_completed=bytes_completed,
-                                    current_item=(
-                                        ""
-                                        if pending_count == 0
-                                        else outcome.action.source_rel_path
-                                        or outcome.action.previous_rel_path
-                                    ),
-                                    last_message=(
-                                        f"已处理 {completed + failed + conflicts:,} / {total:,} 项"
-                                    ),
-                                    heartbeat_at=utc_now(),
-                                    summary={
-                                        "conflicts": conflicts,
-                                        "current_index": outcome.action.order_index,
-                                        "workers": self.max_workers,
-                                        "in_flight": pending_count,
-                                    },
-                                )
-                                last_progress_persist = now
-                            self._progress(
-                                progress,
-                                outcome.action,
-                                total,
-                                completed,
-                                failed,
-                                skipped,
+                    if not futures:
+                        group_key = None
+                        continue
+
+                    done, _pending = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        action, _item = futures.pop(future)
+                        outcome = future.result()
+                        if outcome.quota_paused:
+                            quota_paused = True
+                        if not outcome.already_done:
+                            completed += int(outcome.completed)
+                            skipped += int(outcome.skipped)
+                            failed += outcome.failed
+                            conflicts += outcome.conflicts
+                            if outcome.completed:
+                                bytes_completed += outcome.item_bytes
+                        self._progress(
+                            progress,
+                            outcome.action,
+                            total,
+                            completed,
+                            failed,
+                            skipped,
+                        )
+                        lease.checkpoint()
+                        now = time.monotonic()
+                        if (
+                            not futures
+                            or quota_paused
+                            or now - last_progress_persist >= RUN_PROGRESS_PERSIST_SECONDS
+                        ):
+                            active_action = next(
+                                (pending_action for pending_action, _ in futures.values()),
+                                None,
                             )
-                        if quota_paused:
-                            break
-                    if quota_paused:
+                            self.store.update_job_run(
+                                run_id,
+                                completed_items=completed,
+                                failed_items=failed,
+                                skipped_items=skipped,
+                                bytes_completed=bytes_completed,
+                                current_item=(
+                                    active_action.source_rel_path or active_action.previous_rel_path
+                                    if active_action
+                                    else ""
+                                ),
+                                last_message=(
+                                    f"已处理 {completed + failed + conflicts:,} / {total:,} 项"
+                                ),
+                                heartbeat_at=utc_now(),
+                                summary={
+                                    "conflicts": conflicts,
+                                    "current_index": action.order_index,
+                                    "workers": self.max_workers,
+                                    "in_flight": len(futures),
+                                    "scheduler": "sliding_window",
+                                },
+                            )
+                            last_progress_persist = now
+
+                    if quota_paused and not futures:
                         break
+                    if not futures and (
+                        next_entry is None or self._parallel_action_key(next_entry[0]) != group_key
+                    ):
+                        group_key = None
 
             lease.checkpoint()
             status = (
@@ -560,42 +560,46 @@ class MigrationExecutor:
             interruptible.__exit__(None, None, None)
             lease.close()
 
-    def _parallel_action_group(
+    def _parallel_action_key(self, action: PlannedAction) -> tuple[str, int]:
+        """Return a dependency-safe scheduler lane for a plan action."""
+
+        if action.action_type == ActionType.CREATE_FOLDER:
+            depth = len(PurePosixPath(action.destination_rel_path).parts)
+            return (ActionType.CREATE_FOLDER.value, depth)
+        if action.action_type == ActionType.UPLOAD:
+            return (ActionType.UPLOAD.value, 0)
+        # Moves, version updates and destructive structure changes remain
+        # serial until their remote dependency rules are proven independent.
+        return (action.action_type.value, action.order_index)
+
+    def _iter_plan_action_items(
         self,
-        actions: list[PlannedAction],
-        start: int,
-    ) -> list[PlannedAction]:
-        """Return a bounded group whose members have no parent dependency.
+        project_id: str,
+        plan_id: str,
+        *,
+        batch_size: int = 200,
+    ) -> Iterator[tuple[PlannedAction, InventoryItem | None]]:
+        """Stream plan actions without making page boundaries scheduler barriers."""
 
-        Folder actions are only concurrent at the same depth. Uploads are safe
-        after all folder/move actions because the planner orders action types.
-        Other actions stay serial until their dependency rules are explicitly
-        proven safe.
-        """
-
-        first = actions[start]
-        limit = self.max_workers * MAX_QUEUED_ACTIONS_PER_WORKER
-        if first.action_type == ActionType.CREATE_FOLDER:
-            first_depth = len(PurePosixPath(first.destination_rel_path).parts)
-
-            def compatible(candidate: PlannedAction) -> bool:
-                return (
-                    candidate.action_type == ActionType.CREATE_FOLDER
-                    and len(PurePosixPath(candidate.destination_rel_path).parts) == first_depth
+        after_order = -1
+        while True:
+            actions = self.store.list_plan_actions_batch(
+                project_id,
+                plan_id,
+                after_order=after_order,
+                limit=batch_size,
+            )
+            if not actions:
+                return
+            items = self.store.get_inventory_items(
+                action.inventory_item_id for action in actions if action.inventory_item_id
+            )
+            for action in actions:
+                after_order = max(after_order, action.order_index)
+                yield (
+                    action,
+                    items.get(action.inventory_item_id) if action.inventory_item_id else None,
                 )
-
-        elif first.action_type == ActionType.UPLOAD:
-
-            def compatible(candidate: PlannedAction) -> bool:
-                return candidate.action_type == ActionType.UPLOAD
-
-        else:
-            return [first]
-
-        end = start + 1
-        while end < len(actions) and end - start < limit and compatible(actions[end]):
-            end += 1
-        return actions[start:end]
 
     def _execute_action_safely(
         self,
@@ -882,27 +886,15 @@ class MigrationExecutor:
         current = self.store.get_plan_action(action.id)
         token = current.drive_file_token or current.object_token or current.wiki_node_token
         if token:
-            result = self.drive.reconcile_child(
-                parent_token,
-                object_token=token,
-                name=item.name,
-                object_type="file",
-            )
-            if result["matched"]:
-                return token
-            internal_name = deterministic_staging_name(project.id, item.id, item.name)
-            internal = self.drive.reconcile_child(
-                parent_token,
-                object_token=token,
-                name=internal_name,
-                object_type="file",
-            )
-            if not internal["matched"]:
-                raise MigrationBlocked(
-                    "已记录的云盘文件被移动、改名或删除：" + ",".join(result["differences"])
-                )
+            # The upload response token is persisted before the title restore.
+            # On a crash resume, renaming that exact token is idempotent and
+            # avoids enumerating a potentially 1,500-item parent directory.
             self.drive.rename_file(token, item.name, object_type="file")
         else:
+            recover_existing = current.state not in {
+                MigrationState.DISCOVERED,
+                MigrationState.PLANNED,
+            }
             self.store.update_plan_action(
                 action.id,
                 state=MigrationState.UPLOADING,
@@ -916,16 +908,12 @@ class MigrationExecutor:
                 original_name=item.name,
                 resume_session=hooks.resume_upload_session(),
                 hooks=hooks,
+                probe_existing=recover_existing,
             )
             token = staged.file_token
-        result = self.drive.reconcile_child(
-            parent_token,
-            object_token=token,
-            name=item.name,
-            object_type="file",
-        )
-        if not result["matched"]:
-            raise MigrationBlocked("文件上传后云盘对账失败：" + ",".join(result["differences"]))
+        # Successful upload/rename responses are authoritative for the fast
+        # path. Full remote reconciliation remains available on demand and is
+        # mandatory after ambiguous writes or a process restart.
         self.store.update_plan_action(action.id, state=MigrationState.VERIFYING)
         return token
 

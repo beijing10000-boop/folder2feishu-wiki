@@ -16,7 +16,7 @@ def test_settings_enforce_safe_rate_limits() -> None:
         SettingsUpdate(
             app_id="cli_test",
             app_secret="secret",
-            upload_qps=5,
+            upload_qps=5.01,
         )
     with pytest.raises(ValidationError):
         SettingsUpdate(

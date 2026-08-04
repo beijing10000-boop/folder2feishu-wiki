@@ -265,6 +265,22 @@ class ParallelProbeDrive(FakeDrive):
                 self.active -= 1
 
 
+class SlidingWindowProbeDrive(FakeDrive):
+    """Keep the first upload slow until work beyond the initial window starts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._later_upload_started = threading.Event()
+        self.first_released_by_later_upload = False
+
+    def stage_file(self, local_path: Path, **kwargs: Any) -> StagedFile:
+        if local_path.name == "00.bin":
+            self.first_released_by_later_upload = self._later_upload_started.wait(timeout=1)
+        elif local_path.name == "04.bin":
+            self._later_upload_started.set()
+        return super().stage_file(local_path, **kwargs)
+
+
 def _confirm(store: CoreStore, project_id: str) -> None:
     for action in store.list_plan_actions(project_id):
         store.update_plan_action(action.id, merge_details={"plan_confirmed": True})
@@ -325,6 +341,41 @@ def test_executor_parallelizes_independent_file_uploads(tmp_path: Path) -> None:
     assert result.failed == result.conflicts == 0
     assert drive.uploads == 2
     assert drive.max_active >= 2
+
+
+def test_executor_sliding_window_replenishes_while_large_upload_is_running(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sliding-window-source"
+    source.mkdir()
+    for index in range(5):
+        (source / f"{index:02}.bin").write_bytes(bytes([index + 1]))
+    store = CoreStore(tmp_path / "sliding-window.sqlite3")
+    project = store.create_project(
+        name="sliding-window",
+        source_root=source,
+        target_wiki_url="https://example.feishu.cn/wiki/target-parent",
+        target_space_id="space-1",
+        target_parent_node_token="target-parent",
+        identity_key="fixed-user",
+    )
+    InventoryScanner(store).scan(project.id)
+    MigrationPlanner(store).build(project.id)
+    _confirm(store, project.id)
+    drive = SlidingWindowProbeDrive()
+    wiki = FakeWiki(drive)
+
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        wiki,  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "sliding-window-quota.json"),
+        max_workers=2,
+    ).execute(project.id)
+
+    assert result.failed == result.conflicts == 0
+    assert drive.uploads == 5
+    assert drive.first_released_by_later_upload
 
 
 def test_first_run_second_run_move_and_version_update(tmp_path: Path) -> None:

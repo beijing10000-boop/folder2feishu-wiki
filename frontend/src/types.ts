@@ -234,7 +234,11 @@ export interface RunSummary {
   conflicts: number;
   bytes_total: number;
   bytes_completed: number;
+  ledger_bytes_completed?: number;
   eta_seconds?: number;
+  eta_item_seconds?: number;
+  eta_bytes_seconds?: number;
+  eta_basis?: "items" | "bytes" | "items_and_bytes" | "unavailable";
   active_uploads: UploadProgress[];
   quota: QuotaState;
 }

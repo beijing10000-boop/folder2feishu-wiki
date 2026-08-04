@@ -23,8 +23,8 @@ class NoopRateLimiter:
 class IntervalRateLimiter:
     """Thread-safe evenly-spaced limiter.
 
-    Even spacing is intentionally conservative: 4 QPS means one call every
-    250 ms and 100/min means one call every 600 ms.
+    Even spacing avoids bursts: 5 QPS means one call every 200 ms and
+    100/min means one call every 600 ms.
     """
 
     def __init__(
@@ -85,7 +85,7 @@ class RateLimitSet:
         wiki_write: RateLimiter | None = None,
         general: RateLimiter | None = None,
     ) -> None:
-        shared_drive = drive_upload or IntervalRateLimiter(4, 1)
+        shared_drive = drive_upload or IntervalRateLimiter(5, 1)
         legacy_wiki = wiki or IntervalRateLimiter(100, 60)
         self._groups: dict[str, RateLimiter] = {
             self.DRIVE_UPLOAD: shared_drive,

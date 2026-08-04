@@ -28,7 +28,7 @@ v3 是独立的新程序：不读取 v2 知识库版的配置、数据库或迁�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.2/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.3/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
@@ -77,6 +77,8 @@ http://127.0.0.1:8000/oauth/callback
 3. 预检：检查授权、云盘容量、目录深度、单层对象数、占位文件和名称限制。
 4. 差异计划：确认每一项创建、上传、移动、改名、换版、跳过或冲突动作。
 5. 运行对账：后台执行并显示进度、当前对象、心跳、预计剩余时间、分片进度与实时日志。
+
+迁移执行器使用有界滑动队列：任一文件完成后立即补入下一项，不会因为同批次中仍有超大文件而让其他工作线程空等。多个大文件可以同时占用不同工作线程，但全部云盘写请求仍共同遵守每秒 5 次的安全上限，并在飞书返回限流时自动冷却。
 
 正式全量前请先用 3–10 个代表性文件做试迁，其中包含三级目录和一个大于 20 MB 的文件。
 
