@@ -223,23 +223,26 @@ class ApplicationServices:
             if self._client is None or self._api_client_key != key:
                 if self._client:
                     self._client.close()
+                drive_limiter = IntervalRateLimiter(settings.upload_qps, 1)
+                wiki_limiter = IntervalRateLimiter(
+                    settings.wiki_calls_per_minute,
+                    60,
+                )
                 limits = RateLimitSet(
-                    drive_upload=IntervalRateLimiter(settings.upload_qps, 1),
-                    # Feishu applies limits per endpoint.  Keeping reads,
-                    # creates and writes in one bucket made harmless task
-                    # polling consume the node-create budget.
-                    wiki_create=IntervalRateLimiter(
-                        settings.wiki_calls_per_minute,
-                        60,
-                    ),
-                    wiki_read=IntervalRateLimiter(
-                        settings.wiki_calls_per_minute,
-                        60,
-                    ),
-                    wiki_write=IntervalRateLimiter(
-                        settings.wiki_calls_per_minute,
-                        60,
-                    ),
+                    # Upload, multipart calls and Drive metadata writes share
+                    # one conservative application bucket.  In particular,
+                    # restoring a staging file title must not burst outside
+                    # the upload rate after several workers finish together.
+                    drive_upload=drive_limiter,
+                    drive_write=drive_limiter,
+                    # Feishu may enforce a tenant/application window across
+                    # Wiki operations.  A shared bucket is slower than three
+                    # independent 100/min buckets but prevents aggregate
+                    # create/move/poll traffic from exceeding that window.
+                    wiki=wiki_limiter,
+                    wiki_create=wiki_limiter,
+                    wiki_read=wiki_limiter,
+                    wiki_write=wiki_limiter,
                 )
                 self._client = FeishuAPIClient(self.token_provider(), rate_limits=limits)
                 self._api_client_key = key

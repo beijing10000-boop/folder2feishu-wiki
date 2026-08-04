@@ -9,10 +9,15 @@ from typing import Protocol
 class RateLimiter(Protocol):
     def acquire(self) -> None: ...
 
+    def defer(self, seconds: float) -> None: ...
+
 
 class NoopRateLimiter:
     def acquire(self) -> None:
         return
+
+    def defer(self, seconds: float) -> None:
+        del seconds
 
 
 class IntervalRateLimiter:
@@ -47,9 +52,21 @@ class IntervalRateLimiter:
                 now = max(self._monotonic(), self._next_allowed)
             self._next_allowed = max(now, self._next_allowed) + self._interval
 
+    def defer(self, seconds: float) -> None:
+        """Apply a server-requested cooldown to every caller in this bucket."""
+
+        if seconds <= 0:
+            return
+        with self._lock:
+            self._next_allowed = max(
+                self._next_allowed,
+                self._monotonic() + float(seconds),
+            )
+
 
 class RateLimitSet:
     DRIVE_UPLOAD = "drive_upload"
+    DRIVE_WRITE = "drive_write"
     WIKI_CREATE = "wiki_create"
     WIKI_READ = "wiki_read"
     WIKI_WRITE = "wiki_write"
@@ -61,15 +78,18 @@ class RateLimitSet:
         self,
         *,
         drive_upload: RateLimiter | None = None,
+        drive_write: RateLimiter | None = None,
         wiki: RateLimiter | None = None,
         wiki_create: RateLimiter | None = None,
         wiki_read: RateLimiter | None = None,
         wiki_write: RateLimiter | None = None,
         general: RateLimiter | None = None,
     ) -> None:
+        shared_drive = drive_upload or IntervalRateLimiter(4, 1)
         legacy_wiki = wiki or IntervalRateLimiter(100, 60)
         self._groups: dict[str, RateLimiter] = {
-            self.DRIVE_UPLOAD: drive_upload or IntervalRateLimiter(4, 1),
+            self.DRIVE_UPLOAD: shared_drive,
+            self.DRIVE_WRITE: drive_write or shared_drive,
             self.WIKI: legacy_wiki,
             self.WIKI_CREATE: wiki_create or legacy_wiki,
             self.WIKI_READ: wiki_read or legacy_wiki,
@@ -82,6 +102,7 @@ class RateLimitSet:
         noop = NoopRateLimiter()
         return cls(
             drive_upload=noop,
+            drive_write=noop,
             wiki=noop,
             wiki_create=noop,
             wiki_read=noop,
@@ -95,3 +116,17 @@ class RateLimitSet:
         except KeyError as exc:
             raise ValueError(f"unknown rate-limit group: {group}") from exc
         limiter.acquire()
+
+    def defer(self, group: str, seconds: float) -> None:
+        """Stop the whole endpoint bucket after Feishu reports a cooldown.
+
+        Without a shared cooldown, one worker sleeps while the remaining
+        workers continue hitting the same server-side window and turn a
+        single 429/99991400 into thousands of retryable failures.
+        """
+
+        try:
+            limiter = self._groups[group]
+        except KeyError as exc:
+            raise ValueError(f"unknown rate-limit group: {group}") from exc
+        limiter.defer(seconds)

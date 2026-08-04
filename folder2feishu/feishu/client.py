@@ -24,8 +24,9 @@ from .rate_limit import RateLimitSet
 
 OPEN_API_BASE = "https://open.feishu.cn/open-apis"
 RETRYABLE_CODES = frozenset({1061045, 99991400, 99991401, 99991402})
-RATE_LIMIT_RETRYABLE_CODES = frozenset({1061045})
+RATE_LIMIT_RETRYABLE_CODES = RETRYABLE_CODES
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+MAX_SERVER_COOLDOWN_SECONDS = 300.0
 LOGGER = logging.getLogger(__name__)
 
 
@@ -73,7 +74,7 @@ class FeishuAPIClient:
         rate_limits: RateLimitSet | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         random_value: Callable[[], float] = random.random,
-        max_attempts: int = 5,
+        max_attempts: int = 8,
         base_delay: float = 0.5,
         max_delay: float = 30,
     ) -> None:
@@ -236,12 +237,26 @@ class FeishuAPIClient:
                     }
                     and exc.retryable
                 )
-                can_retry_rate_limit = retry_mode == RetryMode.RATE_LIMIT and (
-                    exc.status_code == 429 or exc.code in RATE_LIMIT_RETRYABLE_CODES
-                )
+                is_rate_limit = exc.status_code == 429 or exc.code in RATE_LIMIT_RETRYABLE_CODES
+                can_retry_rate_limit = retry_mode == RetryMode.RATE_LIMIT and is_rate_limit
                 if (can_retry_server or can_retry_rate_limit) and attempt < self.max_attempts:
                     METRICS.http_retried()
-                    self.wait(self._backoff(attempt, response))
+                    delay = self._backoff(attempt, response)
+                    if is_rate_limit:
+                        # Apply the cooldown to the shared endpoint bucket so
+                        # every migration worker stops, not only the request
+                        # that happened to receive the throttle response.
+                        self.rate_limits.defer(rate_group, delay)
+                        LOGGER.warning(
+                            "Feishu rate limit reached; endpoint bucket deferred",
+                            extra={
+                                "path": path,
+                                "retry_count": attempt,
+                                "retry_after_seconds": round(delay, 3),
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                    self.wait(delay)
                     continue
                 if (
                     retry_mode == RetryMode.RATE_LIMIT
@@ -299,7 +314,10 @@ class FeishuAPIClient:
     def _backoff(self, attempt: int, response: httpx.Response | None) -> float:
         retry_after = self._retry_after(response) if response is not None else None
         if retry_after is not None:
-            return min(self.max_delay, max(0.0, retry_after))
+            # Server-provided reset values describe the actual remote window;
+            # capping them at the ordinary 30-second exponential limit caused
+            # workers to retry inside the same window and fail again.
+            return min(MAX_SERVER_COOLDOWN_SECONDS, max(0.0, retry_after))
         exponential = min(self.max_delay, self.base_delay * (2 ** (attempt - 1)))
         # Add up to 25% jitter to avoid synchronized retries across projects.
         return exponential * (1 + 0.25 * self._random())
@@ -307,6 +325,11 @@ class FeishuAPIClient:
     @staticmethod
     def _retry_after(response: httpx.Response) -> float | None:
         value = response.headers.get("retry-after")
+        if not value:
+            # Feishu uses this header for both HTTP 429 and legacy HTTP 400
+            # responses with code 99991400.  The value is a delay in seconds,
+            # not an epoch timestamp.
+            value = response.headers.get("x-ogw-ratelimit-reset")
         if not value:
             return None
         try:
