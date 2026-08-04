@@ -247,3 +247,47 @@ def test_initial_scan_hashes_files_with_bounded_parallel_workers(tmp_path, monke
         assert summary["hashes_reused"] == 0
     finally:
         store.close()
+
+
+def test_incremental_scan_checks_cached_files_in_parallel(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(12):
+        (source / f"{index:02}.txt").write_bytes(f"payload-{index}".encode())
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="parallel-cache", source_root=source)
+        assert InventoryScanner(store, hash_workers=4).scan(project.id).complete
+
+        original_verify = scanner_module.verify_cached_digest
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def observed_verify(path, digest, **kwargs):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.02)
+                return original_verify(path, digest, **kwargs)
+            finally:
+                with lock:
+                    active -= 1
+
+        monkeypatch.setattr(scanner_module, "verify_cached_digest", observed_verify)
+        second = InventoryScanner(
+            store,
+            hash_workers=4,
+            hash_queue_size=8,
+        ).scan(project.id)
+
+        assert second.complete
+        assert maximum_active >= 2
+        summary = store.get_job_run(second.run_id).summary
+        assert summary["hashes_reused"] == 12
+        assert summary["hashes_computed"] == 0
+    finally:
+        store.close()

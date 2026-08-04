@@ -28,7 +28,7 @@ v3 是独立的新程序：不读取 v2 知识库版的配置、数据库或迁�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.1/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.2/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
