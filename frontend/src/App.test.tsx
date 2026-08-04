@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AppSettings, AuthStatus, Project, ScanResult } from "./types";
+import type { AppSettings, AuthStatus, Project, RunSummary, ScanResult } from "./types";
 
 const apiMock = vi.hoisted(() => ({
   isDemo: false,
@@ -15,6 +15,7 @@ const apiMock = vi.hoisted(() => ({
   getTree: vi.fn(),
   getPlan: vi.fn(),
   getAudit: vi.fn(),
+  getRuntimeLogs: vi.fn(),
   getRun: vi.fn(),
   saveSettings: vi.fn(),
   startAuth: vi.fn(),
@@ -79,6 +80,7 @@ describe("配置优先迁移向导", () => {
     apiMock.getSettings.mockResolvedValue(emptySettings);
     apiMock.getAuthStatus.mockResolvedValue(emptyAuth);
     apiMock.listProjects.mockResolvedValue([]);
+    apiMock.getRuntimeLogs.mockResolvedValue({ entries: [], next_after: 0, reset: false });
     apiMock.verifyApp.mockResolvedValue({
       ok: true,
       kind: "app",
@@ -346,5 +348,80 @@ describe("配置优先迁移向导", () => {
     await waitFor(() => expect(apiMock.health).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("heading", { name: "盘点", level: 1 })).toBeInTheDocument();
     expect(await screen.findByText("当前页面数据已刷新，所在步骤保持不变。")).toBeInTheDocument();
+  });
+
+  it("运行页直接显示大文件分片字节进度和实时飞书日志", async () => {
+    const project: Project = {
+      id: "project-live-upload",
+      name: "JF 文档迁移",
+      source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
+      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      create_wrapper: true,
+      wrapper_name: "Team FabDazzle - 文档",
+      mode: "safe_incremental",
+      last_run_id: "run-live"
+    };
+    const run: RunSummary = {
+      id: "run-live",
+      project_id: project.id,
+      kind: "MIGRATION",
+      state: "RUNNING",
+      stage: "MIGRATING_UPLOAD",
+      current_path: "FabKids\\Training.mp4",
+      total: 100,
+      completed: 40,
+      failed: 0,
+      conflicts: 0,
+      bytes_total: 1024 * 1024 * 1024,
+      bytes_completed: 400 * 1024 * 1024,
+      active_uploads: [
+        {
+          action_id: "upload-action",
+          relative_path: "FabKids\\Training.mp4",
+          status: "UPLOADING",
+          completed_parts: 25,
+          total_parts: 100,
+          uploaded_bytes: 100 * 1024 * 1024,
+          total_bytes: 400 * 1024 * 1024,
+          percent: 25,
+          attempts: 25,
+          updated_at: "2026-08-04T02:31:12Z"
+        }
+      ],
+      quota: {
+        upload_calls_used: 100,
+        upload_calls_limit: 0,
+        wiki_calls_minute: 0,
+        wiki_calls_limit: 80
+      }
+    };
+    window.localStorage.setItem("folder2feishu:last-step", "run");
+    apiMock.listProjects.mockResolvedValue([project]);
+    apiMock.getScan.mockRejectedValue(new Error("not needed"));
+    apiMock.getTree.mockResolvedValue([]);
+    apiMock.getPlan.mockRejectedValue(new Error("not needed"));
+    apiMock.getAudit.mockResolvedValue({ events: [], items: [] });
+    apiMock.getRun.mockResolvedValue(run);
+    apiMock.getRuntimeLogs.mockResolvedValue({
+      entries: [
+        {
+          id: "log-live",
+          occurred_at: "2026-08-04T02:31:12Z",
+          level: "INFO",
+          logger: "httpx",
+          message: 'HTTP Request: POST https://open.feishu.cn/open-apis/drive/v1/files/upload_part "HTTP/1.1 200 OK"'
+        }
+      ],
+      next_after: 100,
+      reset: false
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "运行对账", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByText("大文件分片进度")).toBeInTheDocument();
+    expect(screen.getByText("25 / 100 分片")).toBeInTheDocument();
+    expect(screen.getByText("100 MB / 400 MB")).toBeInTheDocument();
+    expect(await screen.findByText("分片上传成功")).toBeInTheDocument();
   });
 });

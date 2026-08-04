@@ -4182,3 +4182,204 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.run-live-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
+  gap: 1rem;
+}
+
+.live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 28px;
+  padding: 0 0.65rem;
+  border: 1px solid #cfe8d7;
+  border-radius: 999px;
+  background: #f4fbf6;
+  color: #277844;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.live-chip > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #21a453;
+  box-shadow: 0 0 0 4px rgba(33, 164, 83, 0.1);
+}
+
+.upload-progress-list {
+  display: grid;
+  max-height: 308px;
+  overflow: auto;
+}
+
+.upload-progress-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 148px minmax(120px, 0.5fr) 54px;
+  align-items: center;
+  gap: 0.8rem;
+  min-height: 72px;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.upload-progress-row:last-child {
+  border-bottom: 0;
+}
+
+.upload-progress-row__path,
+.upload-progress-row__numbers {
+  min-width: 0;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.upload-progress-row__path strong,
+.upload-progress-row__path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-progress-row__path strong {
+  color: #101828;
+  font-size: 0.76rem;
+}
+
+.upload-progress-row__path span,
+.upload-progress-row__numbers span {
+  color: #667085;
+  font-size: 0.65rem;
+}
+
+.upload-progress-row__numbers b {
+  color: #344054;
+  font-size: 0.68rem;
+}
+
+.upload-progress-row__bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #eaf0f7;
+}
+
+.upload-progress-row__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1677ff;
+  transition: width 260ms ease;
+}
+
+.upload-progress-row__percent {
+  color: #0f5fc2;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.upload-progress-empty,
+.runtime-log-empty {
+  min-height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  padding: 1rem;
+  color: #667085;
+  font-size: 0.72rem;
+}
+
+.upload-progress-empty svg,
+.runtime-log-empty svg {
+  width: 18px;
+  color: #218542;
+}
+
+.runtime-log-list {
+  max-height: 308px;
+  overflow: auto;
+  background: #fbfcfe;
+}
+
+.runtime-log-row {
+  display: grid;
+  grid-template-columns: 58px 8px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.runtime-log-row:last-child {
+  border-bottom: 0;
+}
+
+.runtime-log-row time,
+.runtime-log-row > b {
+  color: #7b8794;
+  font-family: Consolas, monospace;
+  font-size: 0.62rem;
+}
+
+.runtime-log-row > i {
+  width: 8px;
+  height: 8px;
+  margin-top: 0.18rem;
+  border-radius: 50%;
+  background: #21a453;
+}
+
+.runtime-log-row.is-warning > i {
+  background: #e28a0a;
+}
+
+.runtime-log-row.is-error > i,
+.runtime-log-row.is-critical > i {
+  background: #d92d20;
+}
+
+.runtime-log-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 0.18rem;
+}
+
+.runtime-log-row strong,
+.runtime-log-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-log-row strong {
+  color: #1d2939;
+  font-size: 0.72rem;
+}
+
+.runtime-log-row span {
+  color: #667085;
+  font-size: 0.64rem;
+}
+
+@media (max-width: 1180px) {
+  .run-live-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .upload-progress-row {
+    grid-template-columns: minmax(0, 1fr) 52px;
+  }
+
+  .upload-progress-row__numbers,
+  .upload-progress-row__bar {
+    grid-column: 1 / -1;
+  }
+}

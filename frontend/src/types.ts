@@ -181,6 +181,32 @@ export interface QuotaState {
   next_reset_at?: string;
 }
 
+export interface UploadProgress {
+  action_id: string;
+  relative_path: string;
+  status: "PREPARED" | "UPLOADING" | "FINISHED" | "FAILED" | "EXPIRED";
+  completed_parts: number;
+  total_parts: number;
+  uploaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+  attempts: number;
+  last_error?: string;
+  updated_at: string;
+}
+
+export interface RuntimeLogEntry {
+  id: string;
+  occurred_at: string;
+  level: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
+  logger: string;
+  message: string;
+  path?: string;
+  duration_ms?: number;
+  retry_count?: number;
+  error_type?: string;
+}
+
 export interface RunSummary {
   id: string;
   project_id: string;
@@ -205,6 +231,7 @@ export interface RunSummary {
   bytes_total: number;
   bytes_completed: number;
   eta_seconds?: number;
+  active_uploads: UploadProgress[];
   quota: QuotaState;
 }
 

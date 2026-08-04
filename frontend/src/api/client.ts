@@ -4,10 +4,12 @@ import type {
   MigrationPlan,
   Project,
   ProjectDraft,
+  RuntimeLogEntry,
   RunItem,
   RunSummary,
   ScanResult,
   TreeNode,
+  UploadProgress,
   VerificationResult
 } from "../types";
 import { mockRequest } from "./mock";
@@ -239,6 +241,21 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
     bytes_total: raw.bytes_total ?? progress.bytes_total ?? 0,
     bytes_completed: raw.bytes_completed ?? progress.bytes_completed ?? 0,
     eta_seconds: raw.eta_seconds ?? raw.eta,
+    active_uploads: Array.isArray(raw.active_uploads)
+      ? raw.active_uploads.map((upload: Record<string, any>) => ({
+          action_id: String(upload.action_id ?? ""),
+          relative_path: String(upload.relative_path ?? ""),
+          status: String(upload.status ?? "UPLOADING") as UploadProgress["status"],
+          completed_parts: Number(upload.completed_parts ?? 0),
+          total_parts: Number(upload.total_parts ?? 0),
+          uploaded_bytes: Number(upload.uploaded_bytes ?? 0),
+          total_bytes: Number(upload.total_bytes ?? 0),
+          percent: Number(upload.percent ?? 0),
+          attempts: Number(upload.attempts ?? 0),
+          last_error: upload.last_error ? String(upload.last_error) : undefined,
+          updated_at: String(upload.updated_at ?? "")
+        }))
+      : [],
     quota: {
       ...emptyQuota,
       ...quota,
@@ -392,6 +409,10 @@ export const api = {
   getAudit: (projectId: string, afterId?: number) =>
     request<{ events?: unknown[]; items?: RunItem[]; next_after_id?: number }>(
       `${API_ROOT}/projects/${projectId}/audit${afterId ? `?after_id=${afterId}` : ""}`
+    ),
+  getRuntimeLogs: (after?: number) =>
+    request<{ entries: RuntimeLogEntry[]; next_after: number; reset: boolean }>(
+      `${API_ROOT}/runtime/logs${after === undefined ? "" : `?after=${after}`}`
     ),
   exportAudit: (projectId: string, format: "csv" | "json") =>
     blobRequest(`${API_ROOT}/projects/${projectId}/audit?format=${format}`)

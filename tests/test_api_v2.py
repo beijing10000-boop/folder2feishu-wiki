@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 
 from folder2feishu.api import create_app
 from folder2feishu.application import ApplicationServices
-from folder2feishu.core import ActionType, RunStatus, RunType
+from folder2feishu.core import ActionType, MigrationState, RunStatus, RunType, UploadStatus
+from folder2feishu.core.models import utc_now
 from folder2feishu.job_control import JobSnapshot
 from folder2feishu.runtime import RuntimePaths
 from folder2feishu.security import MemoryCredentialStore
@@ -83,6 +84,75 @@ def test_local_api_contract_and_wrapper_fields(tmp_path: Path) -> None:
             )
             assert invalid.status_code == 422
             assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
+    finally:
+        services.close()
+
+
+def test_run_payload_exposes_multipart_progress_and_runtime_log_tail(tmp_path: Path) -> None:
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.store.create_project(name="live", source_root=tmp_path / "source")
+    action = services.store.save_plan(
+        project.id,
+        "plan-live",
+        [
+            {
+                "action_type": ActionType.UPLOAD,
+                "state": MigrationState.UPLOADING,
+                "source_rel_path": "Training/video.mp4",
+            }
+        ],
+    )[0]
+    services.store.upsert_upload_session(
+        project_id=project.id,
+        planned_action_id=action.id,
+        upload_id="upload-live",
+        idempotency_key="video",
+        file_size=12,
+        part_size=4,
+        total_parts=3,
+    )
+    services.store.record_upload_progress(
+        action.id,
+        completed_part=0,
+        status=UploadStatus.UPLOADING,
+    )
+    run = services.store.create_job_run(
+        project.id,
+        RunType.MIGRATION,
+        status=RunStatus.RUNNING,
+        plan_id="plan-live",
+    )
+    services.store.update_job_run(run.id, heartbeat_at=utc_now())
+    (services.paths.logs / "folder2feishu.log").write_text(
+        '{"server_time":"2026-08-04T02:31:12+00:00","level":"INFO",'
+        '"logger":"httpx","message":"HTTP Request: POST '
+        "https://open.feishu.cn/open-apis/drive/v1/files/upload_part "
+        '\\"HTTP/1.1 200 OK\\""}\n',
+        encoding="utf-8",
+    )
+    app = create_app(services, static_root=Path("frontend/dist").resolve())
+    try:
+        with TestClient(app) as client:
+            payload = client.get(f"/api/v2/runs/{run.id}").json()
+            assert payload["active_uploads"][0] == {
+                "action_id": action.id,
+                "relative_path": "Training/video.mp4",
+                "status": "UPLOADING",
+                "completed_parts": 1,
+                "total_parts": 3,
+                "uploaded_bytes": 4,
+                "total_bytes": 12,
+                "percent": 33.3,
+                "attempts": 0,
+                "last_error": "",
+                "updated_at": payload["active_uploads"][0]["updated_at"],
+            }
+            logs = client.get("/api/v2/runtime/logs").json()
+            assert len(logs["entries"]) == 1
+            assert "upload_part" in logs["entries"][0]["message"]
     finally:
         services.close()
 

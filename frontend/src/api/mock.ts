@@ -6,6 +6,7 @@ import type {
   PreflightResult,
   Project,
   RunItem,
+  RuntimeLogEntry,
   RunSummary,
   ScanResult,
   TreeNode
@@ -332,6 +333,25 @@ const audit: AuditEvent[] = [
   }
 ];
 
+const runtimeLogs: RuntimeLogEntry[] = [
+  {
+    id: "log-1",
+    occurred_at: now(),
+    level: "INFO",
+    logger: "httpx",
+    message: 'HTTP Request: POST https://open.feishu.cn/open-apis/drive/v1/files/upload_part "HTTP/1.1 200 OK"'
+  },
+  {
+    id: "log-2",
+    occurred_at: now(),
+    level: "WARNING",
+    logger: "folder2feishu.feishu.client",
+    message: "Feishu rate limit reached; endpoint bucket deferred",
+    path: "/drive/v1/files/upload_part",
+    retry_count: 1
+  }
+];
+
 const getRun = (): RunSummary => {
   const elapsed = runStartedAt ? (Date.now() - runStartedAt) / 1000 : 0;
   const baseCompleted = runState === "RUNNING" ? Math.min(28_441, 18_706 + Math.floor(elapsed * 2)) : 18_706;
@@ -349,6 +369,20 @@ const getRun = (): RunSummary => {
     bytes_total: scan.summary.bytes,
     bytes_completed: Math.round(scan.summary.bytes * (baseCompleted / 39_924)),
     eta_seconds: runState === "RUNNING" ? 98_840 : undefined,
+    active_uploads: runState === "RUNNING" ? [
+      {
+        action_id: "r2",
+        relative_path: "Design\\Brand Review 2026.pptx",
+        status: "UPLOADING",
+        completed_parts: 5,
+        total_parts: 8,
+        uploaded_bytes: 5 * 4 * 1024 * 1024,
+        total_bytes: 28_411_303,
+        percent: 62.5,
+        attempts: 6,
+        updated_at: now()
+      }
+    ] : [],
     quota: {
       upload_calls_used: 8_742,
       upload_calls_limit: 0,
@@ -461,6 +495,9 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return { run_id: "run_20260730_1024" } as T;
   }
   if (path === "/api/v2/runs/run_20260730_1024") return getRun() as T;
+  if (path.startsWith("/api/v2/runtime/logs")) {
+    return { entries: runtimeLogs, next_after: 128, reset: false } as T;
+  }
   if (path.endsWith("/pause")) runState = "PAUSED";
   if (path.endsWith("/resume")) {
     runState = "RUNNING";

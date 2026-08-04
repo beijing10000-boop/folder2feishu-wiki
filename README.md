@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.5/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.6/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -117,6 +117,13 @@ DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 - Wiki 写操作按飞书官方单应用上限调整为 100 次/分钟；旧版默认 90 会自动升级，自定义较低值保持不变。
 - 运行页显示并行工作线程和当前执行中项目数，暂停、停止、断点恢复和幂等防重规则保持不变。
 - 相同模拟网络延迟下，目录场景由 3.556 秒降至 1.263 秒（2.82 倍），目录加文件场景由 13.188 秒降至 4.008 秒（3.29 倍）。真实速度仍受飞书接口响应和限流影响。
+
+### 2.0.0-rc.6 大文件分片进度与页面实时日志
+
+- 运行页直接显示每个大文件的已完成分片、总分片、已上传字节和百分比。
+- 分片进度读取现有 SQLite 断点台账，刷新页面或重启服务不会丢失。
+- 页面增量显示飞书上传、限流冷却、重试和错误日志，不再要求打开 PowerShell。
+- 日志接口只读取新增的结构化记录并限制数量，避免大日志拖慢页面。
 
 ### 2.0.0-rc.5 飞书限流恢复修复
 

@@ -7,4 +7,4 @@ folder into a Feishu Wiki while retaining the original hierarchy.
 
 from __future__ import annotations
 
-__version__ = "2.0.0rc5"
+__version__ = "2.0.0rc6"
