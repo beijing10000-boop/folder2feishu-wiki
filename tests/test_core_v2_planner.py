@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+import folder2feishu.core.scanner as scanner_module
 from folder2feishu.core import (
     ActionType,
     CoreStore,
@@ -216,5 +219,41 @@ def test_zero_byte_is_reported_and_skipped_without_blocking_plan(tmp_path):
             pass
         else:
             raise AssertionError("incomplete scan unexpectedly produced a plan")
+    finally:
+        store.close()
+
+
+def test_offline_folder_preserves_existing_remote_descendants(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "source"
+    (source / "cloud" / "nested").mkdir(parents=True)
+    (source / "cloud" / "nested" / "file.txt").write_text("data", encoding="utf-8")
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="offline-folder", source_root=source)
+        scanner = InventoryScanner(store)
+        scanner.scan(project.id)
+        add_verified_mappings(store, project.id, store.list_inventory(project.id, present=True))
+
+        calls = 0
+
+        def cloud_folder_is_offline(_: int) -> tuple[bool, bool, bool]:
+            nonlocal calls
+            calls += 1
+            return (True, False, False) if calls == 2 else (False, False, False)
+
+        monkeypatch.setattr(scanner_module, "file_attribute_flags", cloud_folder_is_offline)
+        scanner.scan(project.id)
+        result = MigrationPlanner(store).build(project.id)
+        actions = store.list_plan_actions(project.id, plan_id=result.plan_id)
+        descendants = [
+            action for action in actions if action.previous_rel_path.startswith("cloud/")
+        ]
+        assert descendants
+        assert {action.action_type for action in descendants} == {ActionType.SKIP}
+        assert all(action.details["placeholder_deferred"] is True for action in descendants)
+        assert not result.blocked
     finally:
         store.close()

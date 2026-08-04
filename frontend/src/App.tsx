@@ -90,6 +90,8 @@ const issueCodeLabels: Record<string, string> = {
   FEISHU_PERMISSION: "云盘权限",
   DRIVE_CAPACITY: "云空间容量",
   ONEDRIVE_PLACEHOLDER: "本地文件状态",
+  OFFLINE_PLACEHOLDER: "云端占位文件",
+  source_items: "本地文件状态",
   ZERO_BYTE: "空文件",
   NAME_LENGTH: "名称长度",
   TREE_LIMITS: "目录层级"
@@ -2175,8 +2177,8 @@ function App() {
                     icon={Cloud}
                     label="云端占位文件"
                     value={scan.summary.placeholders.toLocaleString()}
-                    note={scan.summary.placeholders ? "占位文件会阻断迁移" : "本地内容可继续检查"}
-                    tone={scan.summary.placeholders ? "red" : "green"}
+                    note={scan.summary.placeholders ? "本轮延迟上传，不阻断其他文件" : "本地内容可继续检查"}
+                    tone={scan.summary.placeholders ? "amber" : "green"}
                   />
                 </div>
                 <div className="inventory-layout">

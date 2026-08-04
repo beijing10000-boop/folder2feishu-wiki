@@ -495,6 +495,9 @@ class CoreStore:
                     present,
                     is_file,
                     InventoryItem.size > 0,
+                    InventoryItem.is_offline.is_(False),
+                    InventoryItem.is_recall_on_open.is_(False),
+                    InventoryItem.is_recall_on_data_access.is_(False),
                 )
             )
             upload_calls = 0
