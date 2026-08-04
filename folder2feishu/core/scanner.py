@@ -507,11 +507,13 @@ class InventoryScanner:
 
         def record_file(candidate: _FileCandidate, digest: str | None) -> None:
             size = int(candidate.stat_result.st_size)
-            manual = (
+            placeholder = (
                 candidate.is_offline
                 or candidate.is_recall_on_open
                 or candidate.is_recall_on_data_access
-                or digest is None
+            )
+            manual = (
+                (digest is None and not placeholder)
                 or len(candidate.name) > MAX_FEISHU_NAME_LENGTH
                 or candidate.depth > MAX_WIKI_LOCAL_DEPTH
             )
@@ -642,11 +644,7 @@ class InventoryScanner:
                     attrs = int(getattr(directory_stat, "st_file_attributes", 0) or 0)
                     offline, recall_open, recall_data = file_attribute_flags(attrs)
                     manual = (
-                        offline
-                        or recall_open
-                        or recall_data
-                        or len(directory.name) > MAX_FEISHU_NAME_LENGTH
-                        or depth > MAX_WIKI_LOCAL_DEPTH
+                        len(directory.name) > MAX_FEISHU_NAME_LENGTH or depth > MAX_WIKI_LOCAL_DEPTH
                     )
                     item_batch.append(
                         {
@@ -942,13 +940,14 @@ class InventoryScanner:
         if offline or recall_open or recall_data:
             add_issue(
                 IssueCode.OFFLINE_PLACEHOLDER,
-                IssueSeverity.BLOCKING,
-                "OneDrive placeholder was not opened or hydrated",
+                IssueSeverity.WARNING,
+                "本地同步文件尚未下载完成；本轮延迟上传，不阻断其他文件",
                 rel_path,
                 details={
                     "offline": offline,
                     "recall_on_open": recall_open,
                     "recall_on_data_access": recall_data,
+                    "migration_policy": "defer_until_next_scan",
                 },
             )
         if is_file and size == 0:

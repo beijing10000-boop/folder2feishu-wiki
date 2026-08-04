@@ -13,6 +13,7 @@ from .core import (
     ActionType,
     CoreStore,
     InventoryScanner,
+    IssueCode,
     IssueSeverity,
     MigrationPlanner,
     MigrationState,
@@ -307,16 +308,26 @@ class ApplicationServices:
             "盘点已完整落库" if project.scan_complete else "必须先完成一次无中断的本地扫描",
             ok=project.scan_complete,
         )
+        scan_issues = self.store.list_issues(project.id, scan_id=project.current_scan_id)
         blocking_issues = [
-            issue
-            for issue in self.store.list_issues(project.id, scan_id=project.current_scan_id)
-            if issue.severity == IssueSeverity.BLOCKING
+            issue for issue in scan_issues if issue.severity == IssueSeverity.BLOCKING
         ]
+        deferred_placeholders = sum(
+            issue.code == IssueCode.OFFLINE_PLACEHOLDER for issue in scan_issues
+        )
         add(
             "source_items",
             "OneDrive 与文件状态",
-            ("未发现阻断项" if not blocking_issues else f"发现 {len(blocking_issues)} 个阻断项"),
+            (
+                f"发现 {len(blocking_issues)} 个阻断项"
+                if blocking_issues
+                else f"{deferred_placeholders} 个占位对象将在本轮延迟上传；不阻断其他文件"
+                if deferred_placeholders
+                else "未发现阻断项"
+            ),
             ok=not blocking_issues,
+            blocking=bool(blocking_issues),
+            warning=bool(deferred_placeholders and not blocking_issues),
         )
         if not project.scan_complete:
             return PreflightReport(

@@ -67,6 +67,22 @@ def _upload_calls(size: int | None) -> int:
     return 2 + math.ceil(size / CHUNK_SIZE)
 
 
+def _is_placeholder(item: InventoryItem) -> bool:
+    return bool(item.is_offline or item.is_recall_on_open or item.is_recall_on_data_access)
+
+
+def _is_path_within(path: str, parent: str) -> bool:
+    """Return whether *path* is the parent itself or one of its descendants."""
+
+    normalized_path = path.replace("\\", "/").strip("/").casefold()
+    normalized_parent = parent.replace("\\", "/").strip("/").casefold()
+    if not normalized_parent:
+        return True
+    return normalized_path == normalized_parent or normalized_path.startswith(
+        f"{normalized_parent}/"
+    )
+
+
 class MigrationPlanner:
     """Compare current local facts with last verified remote mappings.
 
@@ -103,6 +119,8 @@ class MigrationPlanner:
 
         for item in items:
             if item.kind != ItemKind.FILE:
+                continue
+            if _is_placeholder(item):
                 continue
             mapping = matches.get(item.id)
             if item.id in ambiguity:
@@ -173,6 +191,11 @@ class MigrationPlanner:
 
         matches, ambiguity = self._match(items, mappings)
         matched_mapping_ids = {mapping.id for mapping in matches.values() if mapping is not None}
+        deferred_folder_paths = tuple(
+            item.rel_path
+            for item in items
+            if item.kind == ItemKind.FOLDER and _is_placeholder(item)
+        )
         actions: list[dict[str, Any]] = []
 
         total_source_items = len(items) + len(mappings)
@@ -206,6 +229,22 @@ class MigrationPlanner:
                         mapping.conflict_reason
                         or f"remote mapping status is {mapping.remote_status.value}",
                         details={"scan_issues": item_issues},
+                    )
+                )
+                continue
+            if _is_placeholder(item):
+                actions.append(
+                    self._action(
+                        item,
+                        mapping,
+                        ActionType.SKIP,
+                        "本地同步文件尚未下载完成；本轮延迟上传，下次完整盘点后自动补传",
+                        details={
+                            "scan_issues": item_issues,
+                            "placeholder_deferred": True,
+                            "retry_policy": "rescan_after_hydration",
+                            "remote_left_unchanged": mapping is not None,
+                        },
                     )
                 )
                 continue
@@ -266,6 +305,34 @@ class MigrationPlanner:
             if progress and current_index % 500 == 0:
                 progress(current_index, total_source_items, mapping.last_source_rel_path)
             if mapping.id in matched_mapping_ids:
+                continue
+            deferred_parent = next(
+                (
+                    path
+                    for path in deferred_folder_paths
+                    if _is_path_within(mapping.last_source_rel_path, path)
+                ),
+                None,
+            )
+            if deferred_parent is not None and mapping.remote_status == RemoteStatus.ACTIVE:
+                actions.append(
+                    {
+                        "inventory_item_id": None,
+                        "remote_mapping_id": mapping.id,
+                        "action_type": ActionType.SKIP,
+                        "state": MigrationState.PLANNED,
+                        "source_rel_path": "",
+                        "previous_rel_path": mapping.last_source_rel_path,
+                        "destination_rel_path": "",
+                        "reason": "父目录尚未下载完成；保留现有云端对象并等待下次完整盘点",
+                        "details": {
+                            "placeholder_deferred": True,
+                            "deferred_parent": deferred_parent,
+                            "remote_left_unchanged": True,
+                            "retry_policy": "rescan_after_hydration",
+                        },
+                    }
+                )
                 continue
             action_type = (
                 ActionType.CONFLICT

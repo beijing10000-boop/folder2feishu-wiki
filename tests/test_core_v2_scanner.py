@@ -5,12 +5,14 @@ import threading
 import time
 
 from folder2feishu.core import (
+    ActionType,
     CoreStore,
     InventoryScanner,
     InventoryState,
     IssueCode,
     IssueSeverity,
     ItemKind,
+    MigrationPlanner,
     file_attribute_flags,
 )
 from folder2feishu.core import scanner as scanner_module
@@ -117,6 +119,72 @@ def test_onedrive_attribute_detection():
     assert recall_open
     assert recall_data
     assert file_attribute_flags(0) == (False, False, False)
+
+
+def test_placeholder_is_deferred_then_becomes_upload_after_hydration(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "later.docx").write_bytes(b"downloaded-content")
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="deferred", source_root=source)
+        flag_calls = 0
+
+        def placeholder_on_file(_: int) -> tuple[bool, bool, bool]:
+            nonlocal flag_calls
+            flag_calls += 1
+            return (False, False, False) if flag_calls == 1 else (True, False, False)
+
+        monkeypatch.setattr(scanner_module, "file_attribute_flags", placeholder_on_file)
+        first_scan = InventoryScanner(store).scan(project.id)
+        assert first_scan.complete
+        assert first_scan.blocking_issues == 0
+        issues = store.list_issues(project.id, scan_id=first_scan.scan_id)
+        assert len(issues) == 1
+        assert issues[0].code == IssueCode.OFFLINE_PLACEHOLDER
+        assert issues[0].severity == IssueSeverity.WARNING
+        assert issues[0].details["migration_policy"] == "defer_until_next_scan"
+        placeholder = next(
+            item for item in store.list_inventory(project.id) if item.rel_path == "later.docx"
+        )
+        assert placeholder.state == InventoryState.DISCOVERED
+        assert placeholder.sha256 is None
+
+        first_plan = MigrationPlanner(store).build(project.id)
+        deferred = next(
+            action
+            for action in store.list_plan_actions(project.id, plan_id=first_plan.plan_id)
+            if action.source_rel_path == "later.docx"
+        )
+        assert first_plan.blocked is False
+        assert deferred.action_type == ActionType.SKIP
+        assert deferred.details["placeholder_deferred"] is True
+
+        monkeypatch.setattr(
+            scanner_module,
+            "file_attribute_flags",
+            lambda _: (False, False, False),
+        )
+        second_scan = InventoryScanner(store).scan(project.id)
+        assert second_scan.complete
+        hydrated = next(
+            item for item in store.list_inventory(project.id) if item.rel_path == "later.docx"
+        )
+        assert hydrated.sha256 == hashlib.sha256(b"downloaded-content").hexdigest()
+
+        second_plan = MigrationPlanner(store).build(project.id)
+        upload = next(
+            action
+            for action in store.list_plan_actions(project.id, plan_id=second_plan.plan_id)
+            if action.source_rel_path == "later.docx"
+        )
+        assert upload.action_type == ActionType.UPLOAD
+        assert second_plan.blocked is False
+    finally:
+        store.close()
 
 
 def test_scanner_never_commits_more_than_configured_batch(tmp_path):

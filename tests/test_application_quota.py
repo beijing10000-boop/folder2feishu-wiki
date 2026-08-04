@@ -6,6 +6,7 @@ import pytest
 
 from folder2feishu.application import ApplicationServices, QuotaCapacityUnknown
 from folder2feishu.core import RemoteStatus
+from folder2feishu.core import scanner as scanner_module
 from folder2feishu.feishu import FeishuError
 from folder2feishu.runtime import RuntimePaths
 from folder2feishu.security import MemoryCredentialStore
@@ -59,6 +60,43 @@ def test_quota_capacity_accepts_unlimited_and_compatibility_list_name() -> None:
 
     assert ok is True
     assert "不限额" in message
+
+
+def test_preflight_warns_but_does_not_block_onedrive_placeholders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "later.xlsx").write_bytes(b"placeholder-content")
+    services = ApplicationServices(
+        paths=RuntimePaths.discover(tmp_path / "runtime"),
+        credentials=MemoryCredentialStore(),
+    )
+    project = services.create_project(
+        name="placeholder",
+        source_root=str(source),
+        target_wiki_url="https://example.feishu.cn/drive/folder/folder-token",
+    )
+    calls = 0
+
+    def placeholder_on_file(_: int) -> tuple[bool, bool, bool]:
+        nonlocal calls
+        calls += 1
+        return (False, False, False) if calls == 1 else (True, False, False)
+
+    monkeypatch.setattr(scanner_module, "file_attribute_flags", placeholder_on_file)
+    try:
+        services.scanner.scan(project.id)
+        report = services.preflight(project.id)
+    finally:
+        services.close()
+
+    source_check = next(check for check in report.checks if check["code"] == "source_items")
+    assert source_check["status"] == "warning"
+    assert source_check["blocking"] is False
+    assert "1 个占位对象" in source_check["message"]
+    assert "不阻断其他文件" in source_check["message"]
 
 
 @pytest.mark.parametrize("unlimited", ["true", " TRUE ", 1])
