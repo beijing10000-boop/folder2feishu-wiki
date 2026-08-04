@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 from pathlib import Path, PurePosixPath
 from typing import cast
 
@@ -45,7 +45,6 @@ from .feishu import (
 )
 from .job_control import JobControl, JobStopped
 from .quota import DailyQuotaExceeded, DailyQuotaStore
-
 
 LOGGER = logging.getLogger(__name__)
 
