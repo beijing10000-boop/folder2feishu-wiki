@@ -101,6 +101,27 @@ def test_current_user_quota_fails_closed_without_user_id_field_permission():
         _service(handler).get_current_user_quota()
 
 
+def test_rename_file_retries_legacy_rate_limit_in_drive_write_bucket():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.method == "PATCH"
+        if calls == 1:
+            return httpx.Response(
+                400,
+                headers={"x-ogw-ratelimit-reset": "0"},
+                json={"code": 99991400, "msg": "request trigger frequency limit"},
+            )
+        return httpx.Response(200, json={"code": 0})
+
+    service = _service(handler)
+
+    assert service.rename_file("file-token", "original.xlsx") == "file-token"
+    assert calls == 2
+
+
 def test_can_edit_wiki_checks_container_edit_permission():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.4/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.5/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -118,6 +118,14 @@ DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 - 运行页显示并行工作线程和当前执行中项目数，暂停、停止、断点恢复和幂等防重规则保持不变。
 - 相同模拟网络延迟下，目录场景由 3.556 秒降至 1.263 秒（2.82 倍），目录加文件场景由 13.188 秒降至 4.008 秒（3.29 倍）。真实速度仍受飞书接口响应和限流影响。
 
+### 2.0.0-rc.5 飞书限流恢复修复
+
+- 修复并发迁移中云盘文件改名未进入上传限速通道，导致大量 `99991400` 的问题。
+- Drive 上传、分片和元数据写入共享上传 QPS；Wiki 创建、迁入和任务轮询共享每分钟额度，避免多个独立限速桶叠加超过飞书租户/应用窗口。
+- 同时支持 HTTP 429 和旧式 HTTP 400 的 `99991400`，并将 `99991400/99991401/99991402/1061045` 作为显式可重试限流处理。
+- 读取飞书 `Retry-After` 与 `x-ogw-ratelimit-reset` 响应头；一个线程触发限流后，整个对应请求桶都会按服务器要求冷却。
+- 默认重试窗口覆盖至少一个常见的一分钟频控周期；已经落库的文件 token、分片和 Wiki 任务会在断点恢复时复用，不重复上传。
+
 ## 飞书应用配置
 
 在飞书开放平台创建企业自建应用，申请并发布以下 OAuth 权限：
@@ -173,7 +181,7 @@ App Secret、access token 和 refresh token 不会发送到前端或写入 SQLit
 - 不超过 20 MB 的文件直接上传；更大的文件按 4 MB 分片，分片会话和完成序号即时落库。
 - 每个请求使用非空 `parent_node`。获得 `file_token`、`task_id`、`wiki_token` 后立即写入 SQLite。
 - 请求超时先查询远端状态；不会因为本地未及时落库就盲目重传。
-- 上传队列最高 4 QPS，Wiki 操作最高 100 次/分钟；工具不限制每日累计调用次数，遇到飞书 429 或服务异常时自动退避重试。
+- Drive 上传与元数据写入共享最高 4 QPS，Wiki 操作共享最高 100 次/分钟；程序不另设累计调用上限，但飞书平台的接口级 QPS、分钟和每日限额仍然生效，触发限流时按服务端窗口自动冷却重试。
 - 飞书请求配置连接、读取、写入和连接池超时；临时网络错误有限次指数退避，等待期间仍可暂停或取消。
 - 文件、计划动作和远端映射均分批读取和写入；界面目录树按需展开，日志只增量读取，避免一次加载数万行。
 - SQLite 启用 WAL、`busy_timeout`、schema migration 和项目级执行锁；同一个项目不能被两个实例同时执行。

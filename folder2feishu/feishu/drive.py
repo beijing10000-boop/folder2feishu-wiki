@@ -294,8 +294,9 @@ class DriveService:
         body = self.api.request(
             "POST",
             "/drive/v1/files/create_folder",
+            rate_group=RateLimitSet.DRIVE_WRITE,
             json={"name": name, "folder_token": parent_token},
-            retry_mode=RetryMode.NEVER,
+            retry_mode=RetryMode.RATE_LIMIT,
         )
         data = body.get("data") or {}
         token = str(data.get("token") or data.get("folder_token") or "")
@@ -376,9 +377,10 @@ class DriveService:
         self.api.request(
             "PATCH",
             f"/drive/v1/files/{file_token}",
+            rate_group=RateLimitSet.DRIVE_WRITE,
             params={"type": object_type},
             json={"new_title": new_title},
-            retry_mode=RetryMode.NEVER,
+            retry_mode=RetryMode.RATE_LIMIT,
         )
         return file_token
 

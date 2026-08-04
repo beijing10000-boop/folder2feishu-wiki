@@ -647,7 +647,7 @@ function App() {
               currentSettings.wiki_calls_per_minute <= 100
                 ? "passed"
                 : "idle",
-            message: "并发速率已加载；上传调用总次数不设应用侧上限"
+            message: "并发速率已加载；程序不设累计上限，飞书平台限额仍生效"
           },
           source: {
             status: "idle",
@@ -899,7 +899,7 @@ function App() {
       markValidation(
         "throttle",
         "passed",
-        `${saved.upload_qps} QPS · ${saved.wiki_calls_per_minute} Wiki/分钟 · 调用总次数不设上限`
+        `${saved.upload_qps} QPS · ${saved.wiki_calls_per_minute} Wiki/分钟 · 飞书平台限额仍生效`
       );
       return true;
     } catch (error) {
@@ -1723,7 +1723,7 @@ function App() {
                 <PanelHeading
                   eyebrow="RATE CONTROL"
                   title="上传与知识库并发速率"
-                  copy="工具不限制调用总次数；服务端返回 429 或临时错误时自动退避重试。"
+                  copy="程序不设置自定义累计上限；飞书平台的 QPS、分钟和每日限额仍会生效，触发后自动退避。"
                   icon={Gauge}
                   tools={<ValidationBadge {...validation.throttle} />}
                 />
@@ -1767,8 +1767,8 @@ function App() {
                   <div className="quota-rule">
                     <Infinity size={17} />
                     <span>
-                      <strong>调用总次数不设上限</strong>
-                      仅保留必要的 QPS 节流、429 退避和断点恢复保护。
+                      <strong>程序不设累计上限</strong>
+                      飞书平台限额仍生效，并保留 QPS 节流、服务端冷却和断点恢复保护。
                     </span>
                   </div>
                   <Button
@@ -2170,7 +2170,7 @@ function App() {
                     icon={Cloud}
                     label="预计上传 API 调用"
                     value={scan.summary.upload_calls.toLocaleString()}
-                    note="大文件分片会产生多次调用 · 总次数不设上限"
+                    note="大文件分片会产生多次调用 · 飞书平台限额仍生效"
                     tone="amber"
                   />
                 </div>
@@ -2261,7 +2261,7 @@ function App() {
                 <div>
                   <span className="eyebrow">IMMUTABLE WRITE PROPOSAL · {plan.id}</span>
                   <h2>每一项远端动作，先看清再执行</h2>
-                  <p>生成于 {formatLocalDateTime(plan.created_at)} · 调用总次数不设上限</p>
+                  <p>生成于 {formatLocalDateTime(plan.created_at)} · 程序不设累计上限</p>
                 </div>
                 <div className={`confirmation-seal ${plan.confirmed ? "is-confirmed" : ""}`}>
                   {plan.confirmed ? <BadgeCheck size={22} /> : <FileClock size={22} />}
@@ -2467,7 +2467,7 @@ function App() {
                   </div>
                   <div className="quota-panel__copy">
                     <span>Wiki 节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
-                    <span>调用总次数不设上限；429 自动退避</span>
+                    <span>飞书平台限额仍生效；限流自动冷却重试</span>
                   </div>
                 </Panel>
               </div>
