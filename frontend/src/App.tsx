@@ -80,6 +80,32 @@ const DEFAULT_SCOPES = [
   "contact:user.employee_id:readonly"
 ];
 
+const scopeLabels: Record<string, string> = {
+  offline_access: "保持用户授权",
+  "drive:drive": "访问云空间",
+  "drive:file:upload": "上传文件",
+  "wiki:wiki": "管理知识库节点",
+  "drive:quota_detail:read_one": "读取云空间容量",
+  "contact:user.employee_id:readonly": "读取用户身份"
+};
+
+const issueCodeLabels: Record<string, string> = {
+  FEISHU_PERMISSION: "知识库权限",
+  DRIVE_CAPACITY: "云空间容量",
+  ONEDRIVE_PLACEHOLDER: "本地文件状态",
+  ZERO_BYTE: "空文件",
+  NAME_LENGTH: "名称长度",
+  TREE_LIMITS: "目录层级"
+};
+
+const errorCodeLabels: Record<string, string> = {
+  REMOTE_CHANGED: "远端内容已变化",
+  PERMISSION_DENIED: "权限不足",
+  RATE_LIMITED: "请求频率受限",
+  TIMEOUT: "请求超时",
+  INTERNAL_ERROR: "飞书服务内部错误"
+};
+
 const steps: Array<{
   id: StepId;
   no: string;
@@ -91,7 +117,7 @@ const steps: Array<{
   {
     id: "config",
     no: "01",
-    eyebrow: "CONFIG",
+    eyebrow: "基础配置",
     label: "配置",
     description: "集中填写与逐项验证",
     icon: Settings2
@@ -99,7 +125,7 @@ const steps: Array<{
   {
     id: "scan",
     no: "02",
-    eyebrow: "INVENTORY",
+    eyebrow: "本地盘点",
     label: "盘点",
     description: "只读扫描本地目录",
     icon: ScanLine
@@ -107,7 +133,7 @@ const steps: Array<{
   {
     id: "preflight",
     no: "03",
-    eyebrow: "GUARD",
+    eyebrow: "迁移预检",
     label: "预检",
     description: "权限、容量与文件",
     icon: ShieldCheck
@@ -115,7 +141,7 @@ const steps: Array<{
   {
     id: "plan",
     no: "04",
-    eyebrow: "DIFF",
+    eyebrow: "差异确认",
     label: "差异计划",
     description: "确认每一项写操作",
     icon: Waypoints
@@ -123,7 +149,7 @@ const steps: Array<{
   {
     id: "run",
     no: "05",
-    eyebrow: "CONTROL",
+    eyebrow: "运行控制",
     label: "运行对账",
     description: "断点、速率与证据",
     icon: Gauge
@@ -197,7 +223,11 @@ const stageLabel: Record<string, string> = {
   PAUSED: "安全暂停",
   INTERRUPTED: "服务中断",
   CANCELLED: "用户停止",
-  FAILED: "执行失败"
+  FAILED: "执行失败",
+  VERIFYING: "远端核验",
+  WIKI_MOVING: "迁入知识库",
+  RECONCILE: "远端对账",
+  MIGRATION: "迁移执行"
 };
 
 const describeStage = (stage?: string): string => {
@@ -207,13 +237,39 @@ const describeStage = (stage?: string): string => {
     const action = stage.slice("MIGRATING_".length) as PlannedActionKind;
     return actionLabel[action] ? `正在${actionLabel[action]}` : "正在迁移项目";
   }
-  return stage;
+  return statusLabel[stage] ?? "迁移处理中";
+};
+
+const translateTechnicalMessage = (message?: string): string => {
+  if (!message) return "";
+  return message
+    .replace(/Feishu(?:APIError|OpenAPIError)|Feishu OpenAPI error/gi, "飞书接口错误")
+    .replace(/OpenAPIError/gi, "开放接口错误")
+    .replace(/request trigger frequency limit/gi, "请求频率超过飞书限制")
+    .replace(/internal server error/gi, "飞书服务内部错误")
+    .replace(/permission denied/gi, "权限不足")
+    .replace(/rate limit(?:ed)?/gi, "请求频率受限")
+    .replace(/request timeout|timed out|timeout/gi, "请求超时")
+    .replace(/SHA-256 matched/gi, "SHA-256 校验一致")
+    .replace(/App ID/gi, "应用编号")
+    .replace(/App Secret|Secret/gi, "应用密钥")
+    .replace(/Windows File ID/gi, "本机文件标识")
+    .replace(/OneDrive/gi, "本地同步文件")
+    .replace(/wiki_token/gi, "知识库令牌")
+    .replace(/OAuth/gi, "用户授权")
+    .replace(/Wiki/gi, "知识库")
+    .replace(/source item has no remote mapping/gi, "源项目尚无远端映射");
+};
+
+const describeErrorCode = (code?: string): string => {
+  if (!code) return "";
+  return errorCodeLabels[code] ?? (/^\d+$/.test(code) ? `错误码 ${code}` : "迁移异常");
 };
 
 const describeRuntimeLog = (entry: RuntimeLogEntry): { title: string; detail: string } => {
   const message = entry.message;
   if (message.includes("/upload_part") && message.includes("200 OK")) {
-    return { title: "分片上传成功", detail: "飞书已接收一个4MB文件分片" };
+    return { title: "分片上传成功", detail: "飞书已接收一个 4 MB 文件分片" };
   }
   if (message.includes("/upload_prepare") && message.includes("200 OK")) {
     return { title: "分片会话已建立", detail: "飞书已返回大文件上传策略" };
@@ -576,7 +632,7 @@ function App() {
     (error: unknown) => {
       const message =
         error instanceof ApiError || error instanceof Error ? error.message : "操作没有完成，请重试。";
-      notify(message, "error");
+      notify(translateTechnicalMessage(message), "error");
     },
     [notify]
   );
@@ -661,13 +717,13 @@ function App() {
             message:
               currentSettings.app_id && currentSettings.app_secret_configured
                 ? "应用凭据已保存，请点击按钮向飞书验证"
-                : "请填写应用 ID、Secret 和回调地址"
+                : "请填写应用编号、应用密钥和回调地址"
           },
           oauth: {
             status: "idle",
             message: currentAuth.authorized
-              ? "已发现 OAuth 授权，请点击按钮回读身份与六项权限"
-              : "请完成飞书 OAuth 授权"
+              ? "已发现用户授权，请点击按钮回读身份与六项权限"
+              : "请完成飞书用户授权"
           },
           throttle: {
             status:
@@ -683,13 +739,13 @@ function App() {
             status: "idle",
             message: activeProject?.source_root
               ? "本地根目录已保存，请点击按钮做只读可读性检查"
-              : "请填写 Windows 本地绝对路径"
+              : "请填写本机绝对路径"
           },
           target: {
             status: "idle",
             message: activeProject?.target_wiki_url
-              ? "知识库 URL 已保存，请点击按钮读取节点并检查页面编辑权限"
-              : "请填写飞书知识库 URL"
+              ? "知识库地址已保存，请点击按钮读取节点并检查页面编辑权限"
+              : "请填写飞书知识库地址"
           },
           policy: {
             status: activeProject ? "passed" : "idle",
@@ -902,7 +958,7 @@ function App() {
   const validateApp = async (): Promise<boolean> => {
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
     if (!settings.app_id.trim() || (!settings.app_secret_configured && !secret.trim())) {
-      markValidation("app", "failed", "必须填写 App ID；首次配置还必须填写 App Secret");
+      markValidation("app", "failed", "必须填写应用编号；首次配置还必须填写应用密钥");
       return false;
     }
     if (!throttleConfigurationValid()) {
@@ -924,27 +980,27 @@ function App() {
       const nextAuth = await api.getAuthStatus();
       setAuth(nextAuth);
       const result = await api.verifyApp();
-      markValidation("app", "passed", result.message);
+      markValidation("app", "passed", translateTechnicalMessage(result.message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "应用配置验证失败";
-      markValidation("app", "failed", message);
+      markValidation("app", "failed", translateTechnicalMessage(message));
       return false;
     }
   };
 
   const validateThrottle = async (): Promise<boolean> => {
-    markValidation("throttle", "checking", "正在验证上传与 Wiki 并发速率…");
+    markValidation("throttle", "checking", "正在验证上传与知识库并发速率…");
     if (!throttleConfigurationValid()) {
       markValidation(
         "throttle",
         "failed",
-        "范围必须为：0 < 上传 QPS ≤ 4、Wiki 1–100 次/分钟"
+        "范围必须为：每秒上传请求数大于 0 且不超过 4，知识库调用为每分钟 1–100 次"
       );
       return false;
     }
     if (!settings.app_id.trim() || (!settings.app_secret_configured && !secret.trim())) {
-      markValidation("throttle", "failed", "请先填写飞书 App ID 和 App Secret，后端才能保存设置");
+      markValidation("throttle", "failed", "请先填写飞书应用编号和应用密钥，本机服务才能保存设置");
       return false;
     }
     try {
@@ -962,7 +1018,7 @@ function App() {
       markValidation(
         "throttle",
         "passed",
-        `${saved.upload_qps} QPS · ${saved.wiki_calls_per_minute} Wiki/分钟 · 飞书平台限额仍生效`
+        `每秒上传 ${saved.upload_qps} 次 · 知识库每分钟 ${saved.wiki_calls_per_minute} 次 · 飞书平台限额仍生效`
       );
       return true;
     } catch (error) {
@@ -976,16 +1032,16 @@ function App() {
   };
 
   const validateOauth = async (): Promise<boolean> => {
-    markValidation("oauth", "checking", "正在回读 OAuth 用户身份与权限范围…");
+    markValidation("oauth", "checking", "正在回读用户授权身份与权限范围…");
     try {
       const result = await api.verifyOauth();
       const nextAuth = await api.getAuthStatus();
       setAuth(nextAuth);
-      markValidation("oauth", "passed", result.message);
+      markValidation("oauth", "passed", translateTechnicalMessage(result.message));
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "OAuth 身份验证失败";
-      markValidation("oauth", "failed", message);
+      const message = error instanceof Error ? error.message : "用户授权身份验证失败";
+      markValidation("oauth", "failed", translateTechnicalMessage(message));
       return false;
     }
   };
@@ -1033,14 +1089,14 @@ function App() {
   };
 
   const validateSource = async (): Promise<boolean> => {
-    markValidation("source", "checking", "正在检查 Windows 本地根目录配置…");
+    markValidation("source", "checking", "正在检查本机根目录配置…");
     if (!sourceConfigurationValid()) {
-      markValidation("source", "failed", "请输入盘符绝对路径或 UNC 路径");
+      markValidation("source", "failed", "请输入盘符绝对路径或网络共享路径");
       return false;
     }
     try {
       const result = await api.verifySource(draft.source_root.trim());
-      markValidation("source", "passed", result.message);
+      markValidation("source", "passed", translateTechnicalMessage(result.message));
       if (targetConfigurationValid()) {
         await persistProject(true);
       }
@@ -1048,7 +1104,7 @@ function App() {
       markValidation(
         "source",
         "failed",
-        error instanceof Error ? error.message : "本地根目录验证失败"
+        error instanceof Error ? translateTechnicalMessage(error.message) : "本地根目录验证失败"
       );
       return false;
     }
@@ -1056,25 +1112,25 @@ function App() {
   };
 
   const validateTarget = async (): Promise<boolean> => {
-    markValidation("target", "checking", "正在检查飞书知识库 URL 配置…");
+    markValidation("target", "checking", "正在检查飞书知识库地址配置…");
     if (!targetConfigurationValid()) {
       markValidation(
         "target",
         "failed",
-        "必须填写 https://*.feishu.cn/wiki/... 或 larksuite.com/wiki/... 地址"
+        "必须填写有效的飞书知识库父节点地址"
       );
       return false;
     }
     try {
       const result = await api.verifyTarget(draft.target_wiki_url.trim());
       if (sourceConfigurationValid()) await persistProject(true);
-      markValidation("target", "passed", result.message);
+      markValidation("target", "passed", translateTechnicalMessage(result.message));
       return true;
     } catch (error) {
       markValidation(
         "target",
         "failed",
-        error instanceof Error ? error.message : "后端未接受知识库配置"
+        error instanceof Error ? translateTechnicalMessage(error.message) : "本机服务未接受知识库配置"
       );
       return false;
     }
@@ -1437,14 +1493,14 @@ function App() {
             <i />
           </span>
           <div>
-            <span>Folder2Feishu Wiki</span>
+            <span>本地目录到飞书知识库</span>
             <strong>文件迁移控制台</strong>
           </div>
         </div>
         <div className="topbar__route" aria-label="迁移方向">
-          <span><HardDrive size={15} /> WINDOWS LOCAL</span>
+          <span><HardDrive size={15} /> 本机目录</span>
           <span className="route-line"><i /><ArrowRight size={15} /></span>
-          <span className="route-destination"><Boxes size={15} /> FEISHU WIKI</span>
+          <span className="route-destination"><Boxes size={15} /> 飞书知识库</span>
         </div>
         <div className="topbar__status">
           <button
@@ -1462,18 +1518,18 @@ function App() {
             />
             <span>{busy === "page-refresh" ? "刷新中" : "刷新当前页"}</span>
           </button>
-          {api.isDemo ? <span className="demo-flag">DEMO DATA</span> : null}
+          {api.isDemo ? <span className="demo-flag">演示数据</span> : null}
           <span className={`live-signal ${auth.authorized ? "is-live" : ""}`}>
             <i />
             {auth.authorized ? "身份已锁定" : "等待授权"}
           </span>
-          <span className="version">BUILD {version}</span>
+          <span className="version">版本 {version}</span>
         </div>
       </header>
 
       <aside className="step-rail" aria-label="迁移步骤">
         <div className="step-rail__title">
-          <span>RUNBOOK</span>
+          <span>迁移流程</span>
           <strong>五段式迁移</strong>
         </div>
         <nav>
@@ -1506,7 +1562,7 @@ function App() {
           <LockKeyhole size={17} aria-hidden="true" />
           <div>
             <strong>只读源目录</strong>
-            <span>本工具不会修改或删除 OneDrive 本地文件。</span>
+            <span>本工具不会修改或删除本地同步文件。</span>
           </div>
         </div>
       </aside>
@@ -1520,13 +1576,13 @@ function App() {
           </div>
           {project ? (
             <div className="project-plate">
-              <span>ACTIVE PROJECT</span>
+              <span>当前项目</span>
               <strong>{project.name}</strong>
-              <small>ID · {project.id}</small>
+              <small>项目编号 · {project.id}</small>
             </div>
           ) : (
             <div className="project-plate is-empty">
-              <span>ACTIVE PROJECT</span>
+              <span>当前项目</span>
               <strong>尚未创建迁移项目</strong>
               <small>完成配置验证后生成台账</small>
             </div>
@@ -1541,7 +1597,7 @@ function App() {
                 <strong>
                   {backgroundTask.kind === "PLAN" ? "正在生成差异计划" : "正在执行远端对账"}
                 </strong>
-                <span>{backgroundTask.last_message || "后台任务已受理，正在准备执行…"}</span>
+                <span>{translateTechnicalMessage(backgroundTask.last_message) || "后台任务已受理，正在准备执行…"}</span>
                 {backgroundTask.current_path ? <small>{backgroundTask.current_path}</small> : null}
               </div>
             </div>
@@ -1578,7 +1634,7 @@ function App() {
                 <div className="config-overview__title">
                   <span className="config-overview__mark"><Settings2 size={21} /></span>
                   <div>
-                    <span className="eyebrow">MANDATORY CONFIG GATE</span>
+                    <span className="eyebrow">必要配置检查</span>
                     <h2>先配置、逐项验证，再进入迁移流程</h2>
                     <p>全部必要配置逐项验证通过后，系统才会开放“盘点”及后续步骤。</p>
                   </div>
@@ -1591,9 +1647,9 @@ function App() {
                           (item) => item.status === "passed"
                         ).length
                       }
-                      <small>/ 7</small>
+                      <small>/ 6</small>
                     </strong>
-                    <span>{configReady ? "READY" : "REQUIRED"}</span>
+                    <span>{configReady ? "已就绪" : "待完成"}</span>
                   </div>
                   <Button
                     icon={SearchCheck}
@@ -1615,11 +1671,11 @@ function App() {
               <div className="validation-grid" aria-label="必要配置验证状态">
                 {(
                   [
-                    ["app", "01", "飞书应用", "App ID / Secret / 回调地址"],
-                    ["oauth", "02", "OAuth 身份", "固定用户与完整权限范围"],
-                    ["throttle", "03", "并发速率", "上传 QPS / Wiki 操作频率"],
-                    ["source", "04", "本地来源", "Windows 绝对路径"],
-                    ["target", "05", "知识库落点", "Wiki 父节点 URL"],
+                    ["app", "01", "飞书应用", "应用编号、应用密钥与回调地址"],
+                    ["oauth", "02", "用户授权", "固定用户与完整权限范围"],
+                    ["throttle", "03", "并发速率", "上传与知识库操作频率"],
+                    ["source", "04", "本地来源", "本机绝对路径"],
+                    ["target", "05", "知识库落点", "知识库父节点地址"],
                     ["policy", "06", "安全策略", "根节点与安全增量"]
                   ] as Array<[ValidationKey, string, string, string]>
                 ).map(([key, no, label, detail]) => (
@@ -1639,9 +1695,9 @@ function App() {
                 <div>
                   <strong>验证边界</strong>
                   <span>
-                    本页每个按钮都调用独立后端验证：应用凭据、OAuth 身份、本地根层可读性和
-                    Wiki 页面编辑权限均会真实检查。不会为验证而写入飞书；容器编辑能力由首个小批试迁确认，
-                    OneDrive 占位状态与全目录完整性由“盘点”检查。
+                    本页每个按钮都调用独立后端验证：应用凭据、用户授权身份、本地根层可读性和
+                    知识库页面编辑权限均会真实检查。不会为验证而写入飞书；容器编辑能力由首个小批试迁确认，
+                    云端占位状态与全目录完整性由“盘点”检查。
                   </span>
                 </div>
               </div>
@@ -1650,9 +1706,9 @@ function App() {
             <div className="view-grid view-grid--connect">
               <Panel>
                 <PanelHeading
-                  eyebrow="APPLICATION CREDENTIALS"
+                  eyebrow="应用凭据"
                   title="飞书应用与本机安全配置"
-                  copy="App Secret 只提交给本机后端，以 Windows DPAPI 加密保存，页面不会回显。"
+                  copy="应用密钥只提交给本机服务，并由系统加密保存，页面不会回显。"
                   icon={KeyRound}
                   tools={<ValidationBadge {...validation.app} />}
                 />
@@ -1664,23 +1720,23 @@ function App() {
                   }}
                 >
                   <div className="field-grid">
-                    <Field label="飞书 App ID" required>
+                    <Field label="飞书应用编号" required>
                       <input
                         value={settings.app_id}
                         onChange={(event) => {
                           setSettings({ ...settings, app_id: event.target.value });
                           markValidation("app", "idle", "应用配置已修改，请重新验证");
-                          markValidation("oauth", "idle", "应用配置变化后需要重新验证 OAuth 身份");
+                          markValidation("oauth", "idle", "应用配置变化后需要重新验证用户授权身份");
                           setPreflight(undefined);
                           setPlan(undefined);
                         }}
-                        placeholder="cli_xxxxxxxxxxxxxxxx"
+                        placeholder="请输入飞书应用编号"
                         autoComplete="off"
                         required
                       />
                     </Field>
                     <Field
-                      label="App Secret"
+                      label="应用密钥"
                       hint={settings.app_secret_configured ? "已加密保存；留空表示不更换。" : "首次配置必须填写，页面不会回显。"}
                       required={!settings.app_secret_configured}
                     >
@@ -1689,24 +1745,24 @@ function App() {
                         value={secret}
                         onChange={(event) => {
                           setSecret(event.target.value);
-                          markValidation("app", "idle", "App Secret 已修改，请重新验证");
-                          markValidation("oauth", "idle", "应用配置变化后需要重新验证 OAuth 身份");
+                          markValidation("app", "idle", "应用密钥已修改，请重新验证");
+                          markValidation("oauth", "idle", "应用配置变化后需要重新验证用户授权身份");
                           setPreflight(undefined);
                           setPlan(undefined);
                         }}
-                        placeholder={settings.app_secret_configured ? "••••••••••••••••" : "输入 App Secret"}
+                        placeholder={settings.app_secret_configured ? "••••••••••••••••" : "输入应用密钥"}
                         autoComplete="new-password"
                         required={!settings.app_secret_configured}
                       />
                     </Field>
                   </div>
-                  <Field label="OAuth 回调地址" required hint="必须与飞书开放平台安全设置完全一致。">
+                  <Field label="用户授权回调地址" required hint="必须与飞书开放平台安全设置完全一致。">
                     <input
                       value={settings.redirect_uri}
                       onChange={(event) => {
                         setSettings({ ...settings, redirect_uri: event.target.value });
                         markValidation("app", "idle", "回调地址已修改，请重新验证");
-                        markValidation("oauth", "idle", "应用配置变化后需要重新验证 OAuth 身份");
+                        markValidation("oauth", "idle", "应用配置变化后需要重新验证用户授权身份");
                         setPreflight(undefined);
                         setPlan(undefined);
                       }}
@@ -1714,9 +1770,9 @@ function App() {
                     />
                   </Field>
                   <div className="scope-rack" aria-label="所需权限范围">
-                    <span className="scope-rack__label">REQUIRED SCOPES</span>
+                    <span className="scope-rack__label">所需授权范围</span>
                     {DEFAULT_SCOPES.map((scope) => (
-                      <code key={scope}><Check size={12} /> {scope}</code>
+                      <code key={scope} title={scope}><Check size={12} /> {scopeLabels[scope] ?? "飞书权限"}</code>
                     ))}
                   </div>
                   <div className="button-row">
@@ -1750,7 +1806,7 @@ function App() {
                       </div>
                       <ValidationBadge {...validation.oauth} />
                     </div>
-                    <span className="eyebrow">FIXED OPERATOR IDENTITY</span>
+                    <span className="eyebrow">固定操作身份</span>
                     <h3>{auth.authorized ? auth.user_name ?? "飞书用户已授权" : "等待完成飞书授权"}</h3>
                     <p>
                       {auth.authorized
@@ -1758,8 +1814,8 @@ function App() {
                         : "先验证应用配置，再在飞书页面确认所需权限。"}
                     </p>
                     <div className="identity-card__meta">
-                      <span>状态 <b>{auth.authorized ? "READY" : "NOT READY"}</b></span>
-                      <span>凭据 <b>WINDOWS DPAPI</b></span>
+                      <span>状态 <b>{auth.authorized ? "已就绪" : "未就绪"}</b></span>
+                      <span>凭据 <b>系统加密保存</b></span>
                     </div>
                     <Button
                       icon={SearchCheck}
@@ -1773,9 +1829,9 @@ function App() {
                 <Panel>
                   <div className="security-list">
                     <h3>本机安全边界</h3>
-                    <div><LockKeyhole size={17} /><span><b>不在浏览器存 Token</b><small>OAuth Token 与 Secret 不进入 localStorage。</small></span></div>
+                    <div><LockKeyhole size={17} /><span><b>不在浏览器保存令牌</b><small>用户授权令牌与应用密钥不会写入浏览器本地存储。</small></span></div>
                     <div><Server size={17} /><span><b>仅监听 127.0.0.1</b><small>迁移控制面不会暴露到局域网。</small></span></div>
-                    <div><Database size={17} /><span><b>台账远离 OneDrive</b><small>数据库保存在 LOCALAPPDATA 并启用 WAL。</small></span></div>
+                    <div><Database size={17} /><span><b>台账独立于同步目录</b><small>数据库保存在本机应用数据目录并启用安全写入。</small></span></div>
                   </div>
                 </Panel>
               </div>
@@ -1784,15 +1840,15 @@ function App() {
             <div className="config-operations-grid">
               <Panel>
                 <PanelHeading
-                  eyebrow="RATE CONTROL"
+                  eyebrow="速率控制"
                   title="上传与知识库并发速率"
-                  copy="程序不设置自定义累计上限；飞书平台的 QPS、分钟和每日限额仍会生效，触发后自动退避。"
+                  copy="程序不设置自定义累计上限；飞书平台的每秒、每分钟和每日限额仍会生效，触发后自动退避。"
                   icon={Gauge}
                   tools={<ValidationBadge {...validation.throttle} />}
                 />
                 <div className="operation-config">
                   <div className="field-grid">
-                    <Field label="文件上传 QPS" required hint="范围：大于 0 且不超过 4">
+                    <Field label="每秒文件上传请求数" required hint="范围：大于 0 且不超过 4">
                       <input
                         type="number"
                         min="0.1"
@@ -1804,12 +1860,12 @@ function App() {
                             ...settings,
                             upload_qps: Number(event.target.value || 0)
                           });
-                          markValidation("throttle", "idle", "上传 QPS 已修改，请重新验证");
+                          markValidation("throttle", "idle", "每秒上传请求数已修改，请重新验证");
                           setPlan(undefined);
                         }}
                       />
                     </Field>
-                    <Field label="Wiki 调用 / 分钟" required hint="范围：1–100">
+                    <Field label="知识库调用次数 / 分钟" required hint="范围：1–100">
                       <input
                         type="number"
                         min="1"
@@ -1821,7 +1877,7 @@ function App() {
                             ...settings,
                             wiki_calls_per_minute: Number(event.target.value || 0)
                           });
-                          markValidation("throttle", "idle", "Wiki 调用频率已修改，请重新验证");
+                          markValidation("throttle", "idle", "知识库调用频率已修改，请重新验证");
                           setPlan(undefined);
                         }}
                       />
@@ -1831,7 +1887,7 @@ function App() {
                     <Infinity size={17} />
                     <span>
                       <strong>程序不设累计上限</strong>
-                      飞书平台限额仍生效，并保留 QPS 节流、服务端冷却和断点恢复保护。
+                      飞书平台限额仍生效，并保留每秒请求节流、服务端冷却和断点恢复保护。
                     </span>
                   </div>
                   <Button
@@ -1849,7 +1905,7 @@ function App() {
             <div className="view-grid view-grid--source config-second">
               <Panel className="route-builder">
                 <PanelHeading
-                  eyebrow="ONE-WAY MIGRATION ROUTE"
+                  eyebrow="单向迁移路径"
                   title="唯一来源、唯一落点与安全增量"
                   copy="源目录始终只读；飞书云盘只承担临时中转，最终节点进入知识库。"
                   icon={Route}
@@ -1858,10 +1914,10 @@ function App() {
                   <div className="route-node">
                     <div className="route-node__type">
                       <HardDrive size={21} />
-                      <span>03 · SOURCE</span>
+                      <span>03 · 本地来源</span>
                     </div>
                     <div className="route-node__body">
-                      <Field label="本地 OneDrive 已下载目录" required hint="请确保目标文件显示为绿色实心勾，不能是云端占位。">
+                      <Field label="本地已下载目录" required hint="请确保目标文件显示为绿色实心勾，不能是云端占位。">
                         <input
                           value={draft.source_root}
                           onChange={(event) => {
@@ -1871,7 +1927,7 @@ function App() {
                             setPreflight(undefined);
                             setPlan(undefined);
                           }}
-                          placeholder="D:\TechStyle\Team FabDazzle - 文档"
+                          placeholder="D:\迁移资料\知识库文件"
                           required
                         />
                       </Field>
@@ -1888,7 +1944,7 @@ function App() {
                         </Button>
                       </div>
                     </div>
-                    <span className="route-node__mode">READ ONLY</span>
+                    <span className="route-node__mode">只读</span>
                   </div>
                   <div className="route-spine" aria-hidden="true">
                     <i />
@@ -1898,10 +1954,10 @@ function App() {
                   <div className="route-node route-node--target">
                     <div className="route-node__type">
                       <Boxes size={21} />
-                      <span>04 · DESTINATION</span>
+                      <span>04 · 知识库落点</span>
                     </div>
                     <div className="route-node__body">
-                      <Field label="飞书知识库父节点 URL" required hint="支持 /wiki/… 地址；必须拥有此节点的容器编辑权限。">
+                      <Field label="飞书知识库父节点地址" required hint="支持知识库地址；必须拥有此节点的容器编辑权限。">
                         <input
                           type="url"
                           value={draft.target_wiki_url}
@@ -1911,7 +1967,7 @@ function App() {
                             setPreflight(undefined);
                             setPlan(undefined);
                           }}
-                          placeholder="https://example.feishu.cn/wiki/xxxxxxxx"
+                          placeholder="请输入飞书知识库父节点地址"
                           required
                         />
                       </Field>
@@ -1928,7 +1984,7 @@ function App() {
                         </Button>
                       </div>
                     </div>
-                    <span className="route-node__mode">FINAL</span>
+                    <span className="route-node__mode">最终落点</span>
                   </div>
                   <div className="field-grid route-options">
                     <Field label="迁移项目名称">
@@ -1945,7 +2001,7 @@ function App() {
                           markValidation("policy", "idle", "根节点名称已修改，请重新验证");
                           setPlan(undefined);
                         }}
-                        placeholder="Team FabDazzle - 文档"
+                        placeholder="本地文档迁移"
                         disabled={!draft.create_wrapper}
                       />
                     </Field>
@@ -1999,7 +2055,7 @@ function App() {
               <div className="side-stack">
                 <Panel>
                   <div className="flow-legend">
-                    <span className="eyebrow">TRANSFER PHYSICS</span>
+                    <span className="eyebrow">传输路径</span>
                     <h3>文件会经过哪里？</h3>
                     <div className="flow-legend__line">
                       <span><HardDrive size={17} /> 本地文件</span>
@@ -2008,19 +2064,19 @@ function App() {
                       <ArrowRight size={14} />
                       <span><Boxes size={17} /> 知识库</span>
                     </div>
-                    <p>成功迁入后，中转目录不再保留该文件。Word、Excel、PPTX、PDF 保持原格式。</p>
+                    <p>成功迁入后，中转目录不再保留该文件，各类文件均保持原格式。</p>
                   </div>
                 </Panel>
                 <Panel tone="green">
                   <div className="safety-contract">
                     <ShieldCheck size={24} />
                     <div>
-                      <span className="eyebrow">SAFE INCREMENTAL</span>
+                      <span className="eyebrow">安全增量</span>
                       <h3>安全增量约定</h3>
                     </div>
                     <ul>
                       <li>内容未变：不重复上传</li>
-                      <li>仅移动改名：复用原 Wiki 节点</li>
+                      <li>仅移动改名：复用原知识库节点</li>
                       <li>内容变化：旧版进入历史区</li>
                       <li>本地删除：只报告，不删飞书</li>
                     </ul>
@@ -2036,16 +2092,16 @@ function App() {
             <Panel className="inventory-command" tone={scan?.summary.scan_complete ? "green" : ""}>
               <div className="inventory-command__route">
                 <div>
-                  <span className="eyebrow">READ-ONLY INVENTORY</span>
+                  <span className="eyebrow">只读盘点</span>
                   <h2>真实读取本地目录，建立可恢复迁移台账</h2>
                   <p>
-                    此阶段递归读取目录、File ID、大小、时间与 SHA-256，不修改或删除任何本地文件。
+                    此阶段递归读取目录、文件标识、大小、时间与 SHA-256，不修改或删除任何本地文件。
                   </p>
                 </div>
                 <div className="inventory-route">
                   <span><HardDrive size={16} /> {draft.source_root || "未配置本地目录"}</span>
                   <ArrowRight size={16} />
-                  <span><Database size={16} /> SQLite 台账</span>
+                  <span><Database size={16} /> 本地迁移台账</span>
                 </div>
               </div>
               <div className="inventory-command__actions">
@@ -2058,7 +2114,7 @@ function App() {
                     <ScanLine size={18} />
                   )}
                   <span>
-                    <small>INVENTORY STATE</small>
+                    <small>盘点状态</small>
                     <strong>
                       {scanActive
                         ? "扫描进行中"
@@ -2091,7 +2147,7 @@ function App() {
                 <div className="scan-live-progress" role="status" aria-live="polite">
                   <progress />
                   <strong>已盘点 {(scan?.scanned_items ?? 0).toLocaleString()} 项</strong>
-                  <span>{scan?.last_message || "正在读取本地目录和计算文件指纹…"}</span>
+                  <span>{translateTechnicalMessage(scan?.last_message) || "正在读取本地目录和计算文件指纹…"}</span>
                   {scan?.current_path ? <small title={scan.current_path}>{scan.current_path}</small> : null}
                 </div>
               ) : null}
@@ -2116,7 +2172,7 @@ function App() {
                   />
                   <Metric
                     icon={Cloud}
-                    label="OneDrive 占位"
+                    label="云端占位文件"
                     value={scan.summary.placeholders.toLocaleString()}
                     note={scan.summary.placeholders ? "占位文件会阻断迁移" : "本地内容可继续检查"}
                     tone={scan.summary.placeholders ? "red" : "green"}
@@ -2125,7 +2181,7 @@ function App() {
                 <div className="inventory-layout">
                   <Panel>
                     <PanelHeading
-                      eyebrow="LOCAL DIRECTORY TREE"
+                      eyebrow="本地目录树"
                       title="原目录盘点结果"
                       copy="文件夹是一等对象；空目录也会在知识库中创建对应节点。"
                       icon={FolderTree}
@@ -2144,14 +2200,14 @@ function App() {
                       )}
                     </div>
                     <div className="tree-limit">
-                      <span>MAX DEPTH <b>{scan.summary.max_depth}</b> / 50</span>
-                      <span>MAX SIBLINGS <b>{scan.summary.max_siblings}</b> / 2,000</span>
+                      <span>最大层级 <b>{scan.summary.max_depth}</b> / 50</span>
+                      <span>单层最多节点 <b>{scan.summary.max_siblings}</b> / 2,000</span>
                     </div>
                   </Panel>
                   <div className="side-stack">
                     <Panel tone={scan.checks.some((check) => check.blocking) ? "red" : "green"}>
                       <PanelHeading
-                        eyebrow="INVENTORY EVIDENCE"
+                        eyebrow="盘点证据"
                         title="本地完整性检查"
                         copy="占位、不可读或超限对象会阻断；飞书不支持的 0 字节文件将记录后自动跳过。"
                         icon={SearchCheck}
@@ -2160,7 +2216,7 @@ function App() {
                         <div><span>不可读</span><strong>{scan.summary.unreadable.toLocaleString()}</strong></div>
                         <div><span>0 字节</span><strong>{scan.summary.empty_files.toLocaleString()}</strong></div>
                         <div><span>名称过长</span><strong>{scan.summary.too_long_names.toLocaleString()}</strong></div>
-                        <div><span>预计上传 API 调用</span><strong>{scan.summary.upload_calls.toLocaleString()}</strong></div>
+                        <div><span>预计上传接口调用</span><strong>{scan.summary.upload_calls.toLocaleString()}</strong></div>
                       </div>
                       <div className="finding-list">
                         {scan.checks.length ? (
@@ -2170,8 +2226,8 @@ function App() {
                               <article className={`finding is-${check.severity}`} key={check.code}>
                                 <Icon size={16} />
                                 <div>
-                                  <strong>{check.title}</strong>
-                                  <span>{check.message}</span>
+                                  <strong>{translateTechnicalMessage(check.title)}</strong>
+                                  <span>{translateTechnicalMessage(check.message)}</span>
                                 </div>
                                 {check.count ? <b>{check.count}</b> : null}
                               </article>
@@ -2186,10 +2242,10 @@ function App() {
                       <div className="inventory-boundary">
                         <ShieldCheck size={22} />
                         <div>
-                          <span className="eyebrow">VALIDATION HANDOFF</span>
+                          <span className="eyebrow">预检交接</span>
                           <h3>本页确认本地事实</h3>
                           <p>
-                            盘点完整后，下一步才会用固定 OAuth 身份真实检查 Wiki 父节点、
+                            盘点完整后，下一步才会用固定授权身份真实检查知识库父节点、
                             容器编辑权限、云盘根目录与租户容量。
                           </p>
                         </div>
@@ -2203,7 +2259,7 @@ function App() {
                 <EmptyState
                   icon={ScanLine}
                   title="尚未建立本地目录台账"
-                  copy="配置页已只读验证目录存在且根层可枚举；点击“开始只读盘点”后，系统会进一步检查全部内容和 OneDrive 占位状态。"
+                  copy="配置页已只读验证目录存在且根层可枚举；点击“开始只读盘点”后，系统会进一步检查全部内容和云端占位状态。"
                   action={
                     <Button
                       variant="primary"
@@ -2231,7 +2287,7 @@ function App() {
                   <Metric icon={HardDrive} label="数据量" value={formatBytes(scan.summary.bytes)} />
                   <Metric
                     icon={Cloud}
-                    label="预计上传 API 调用"
+                    label="预计上传接口调用"
                     value={scan.summary.upload_calls.toLocaleString()}
                     note="大文件分片会产生多次调用 · 飞书平台限额仍生效"
                     tone="amber"
@@ -2242,7 +2298,7 @@ function App() {
                     <AlertTriangle size={22} />
                     <div>
                       <strong>{blocking.length} 类问题阻止正式迁移</strong>
-                      <span>处理后点击“重新执行预检”；工具不会绕过 OneDrive 占位或权限问题。</span>
+                      <span>处理后点击“重新执行预检”；工具不会绕过云端占位或权限问题。</span>
                     </div>
                     <Button icon={RefreshCcw} busy={busy === "preflight"} onClick={refreshPreflight}>
                       重新执行预检
@@ -2263,7 +2319,7 @@ function App() {
                 <div className="preflight-layout">
                   <Panel>
                     <PanelHeading
-                      eyebrow="GUARD RAIL MATRIX"
+                      eyebrow="预检矩阵"
                       title="预检矩阵"
                       copy="阻断项必须清零；警告项会说明自动处理方式或需要关注的边界。"
                       icon={ShieldCheck}
@@ -2275,9 +2331,9 @@ function App() {
                           <article className={`check-card is-${check.severity}`} key={check.code}>
                             <span className="check-card__icon"><Icon size={19} /></span>
                             <div>
-                              <span className="check-card__code">{check.code}</span>
-                              <h3>{check.title}</h3>
-                              <p>{check.message}</p>
+                              <span className="check-card__code">{issueCodeLabels[check.code] ?? "预检项目"}</span>
+                              <h3>{translateTechnicalMessage(check.title)}</h3>
+                              <p>{translateTechnicalMessage(check.message)}</p>
                             </div>
                             {check.count ? <b>{check.count}</b> : <Check size={17} />}
                           </article>
@@ -2287,7 +2343,7 @@ function App() {
                   </Panel>
                   <Panel className="tree-panel">
                     <PanelHeading
-                      eyebrow="LOCAL INVENTORY"
+                      eyebrow="本地盘点"
                       title="目录抽样"
                       copy="目录是独立迁移对象，空目录也会保留。"
                       icon={FolderTree}
@@ -2298,8 +2354,8 @@ function App() {
                       ))}
                     </div>
                     <div className="tree-limit">
-                      <span>MAX DEPTH <b>{scan.summary.max_depth}</b> / 50</span>
-                      <span>MAX SIBLINGS <b>{scan.summary.max_siblings}</b> / 2,000</span>
+                      <span>最大层级 <b>{scan.summary.max_depth}</b> / 50</span>
+                      <span>单层最多节点 <b>{scan.summary.max_siblings}</b> / 2,000</span>
                     </div>
                   </Panel>
                 </div>
@@ -2322,13 +2378,13 @@ function App() {
             <div className="view-stack">
               <div className="plan-header">
                 <div>
-                  <span className="eyebrow">IMMUTABLE WRITE PROPOSAL · {plan.id}</span>
+                  <span className="eyebrow">不可变写入计划 · {plan.id}</span>
                   <h2>每一项远端动作，先看清再执行</h2>
                   <p>生成于 {formatLocalDateTime(plan.created_at)} · 程序不设累计上限</p>
                 </div>
                 <div className={`confirmation-seal ${plan.confirmed ? "is-confirmed" : ""}`}>
                   {plan.confirmed ? <BadgeCheck size={22} /> : <FileClock size={22} />}
-                  <span>{plan.confirmed ? "PLAN CONFIRMED" : "AWAITING CONFIRMATION"}</span>
+                  <span>{plan.confirmed ? "计划已确认" : "等待最终确认"}</span>
                 </div>
               </div>
               <div className="action-grid">
@@ -2341,14 +2397,14 @@ function App() {
                   >
                     <span>{actionLabel[item.kind]}</span>
                     <strong>{item.count.toLocaleString()}</strong>
-                    <small>{item.kind}</small>
+                    <small>本类动作</small>
                   </button>
                 ))}
               </div>
               <div className="plan-layout">
                 <Panel>
                   <PanelHeading
-                    eyebrow="ACTION LEDGER"
+                    eyebrow="差异动作台账"
                     title={actionFilter === "ALL" ? "差异动作样本" : actionLabel[actionFilter]}
                     copy={`显示 ${filteredActions.length} 项代表性记录；完整台账可在运行页导出。`}
                     icon={ListFilter}
@@ -2369,7 +2425,7 @@ function App() {
                       <div className="data-table__row" role="row" key={action.id}>
                         <span role="cell"><i className={`action-pill tone-${actionTone[action.kind]}`}>{actionLabel[action.kind]}</i></span>
                         <span role="cell" className="path-cell" title={action.relative_path}>{action.relative_path}</span>
-                        <span role="cell">{action.reason}</span>
+                        <span role="cell">{translateTechnicalMessage(action.reason)}</span>
                         <span role="cell">{action.bytes ? formatBytes(action.bytes) : "—"}</span>
                       </div>
                     ))}
@@ -2378,10 +2434,10 @@ function App() {
                 <div className="side-stack">
                   <Panel tone="green">
                     <div className="incremental-map">
-                      <span className="eyebrow">DECISION RULES</span>
+                      <span className="eyebrow">决策规则</span>
                       <h3>安全增量决策链</h3>
                       <div><span>01</span><b>路径 + SHA 未变</b><em>跳过</em></div>
-                      <div><span>02</span><b>File ID 未变</b><em>移动 / 改名</em></div>
+                      <div><span>02</span><b>文件标识未变</b><em>移动 / 改名</em></div>
                       <div><span>03</span><b>内容发生变化</b><em>安全换版</em></div>
                       <div><span>04</span><b>本地文件缺失</b><em>仅报告</em></div>
                       <div><span>05</span><b>远端人工变化</b><em>冲突停止</em></div>
@@ -2443,10 +2499,14 @@ function App() {
               <div className={`run-marquee is-${run.state.toLowerCase()}`}>
                 <div className="run-marquee__pulse"><i /><span /></div>
                 <div className="run-marquee__summary">
-                  <span className="eyebrow">RUN · {run.id}</span>
+                  <span className="eyebrow">任务编号 · {run.id}</span>
                   <h2>{statusLabel[run.state] ?? run.state}</h2>
                   <p className="run-marquee__message">
-                    {run.error || run.last_message || run.current_path || "当前没有正在处理的文件"}
+                    {run.error
+                      ? translateTechnicalMessage(run.error)
+                      : run.last_message
+                        ? translateTechnicalMessage(run.last_message)
+                        : run.current_path || "当前没有正在处理的文件"}
                   </p>
                   <dl className="run-status-grid" aria-label="迁移任务详细状态">
                     <div>
@@ -2505,7 +2565,7 @@ function App() {
                 <Panel className="progress-panel">
                   <div className="progress-panel__top">
                     <div>
-                      <span className="eyebrow">ITEM PROGRESS</span>
+                      <span className="eyebrow">迁移总进度</span>
                       <strong>{progress}<small>%</small></strong>
                     </div>
                     <div className="progress-copy">
@@ -2520,7 +2580,7 @@ function App() {
                   </div>
                 </Panel>
                 <Panel className="quota-panel">
-                  <span className="eyebrow">UPLOAD API CALLS</span>
+                  <span className="eyebrow">上传接口调用</span>
                   <div className="quota-unlimited">
                     <Infinity size={28} aria-hidden="true" />
                     <span>
@@ -2529,7 +2589,7 @@ function App() {
                     </span>
                   </div>
                   <div className="quota-panel__copy">
-                    <span>Wiki 节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
+                    <span>知识库节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
                     <span>飞书平台限额仍生效；限流自动冷却重试</span>
                   </div>
                 </Panel>
@@ -2537,7 +2597,7 @@ function App() {
               <div className="run-live-grid">
                 <Panel className="upload-progress-panel">
                   <PanelHeading
-                    eyebrow="MULTIPART UPLOAD"
+                    eyebrow="大文件分片"
                     title="大文件分片进度"
                     copy="每个分片成功后立即写入本地台账；页面刷新或服务重启后仍可继续显示。"
                     icon={UploadCloud}
@@ -2565,17 +2625,17 @@ function App() {
                   ) : (
                     <div className="upload-progress-empty">
                       <CheckCircle2 />
-                      <span>当前没有进行中的分片上传；小于等于20MB的文件会直接上传。</span>
+                      <span>当前没有进行中的分片上传；不超过 20 MB 的文件会直接上传。</span>
                     </div>
                   )}
                 </Panel>
                 <Panel className="runtime-log-panel">
                   <PanelHeading
-                    eyebrow="LIVE SERVICE LOG"
+                    eyebrow="实时服务日志"
                     title="实时迁移日志"
                     copy="只增量显示飞书请求、限流、重试和错误；不会重复读取整个日志文件。"
                     icon={SquareTerminal}
-                    tools={<span className="live-chip"><i />LIVE</span>}
+                    tools={<span className="live-chip"><i />实时</span>}
                   />
                   <div className="runtime-log-list" aria-live="polite">
                     {runtimeLogs.length ? [...runtimeLogs].reverse().map((entry) => {
@@ -2588,7 +2648,7 @@ function App() {
                             <strong>{presentation.title}</strong>
                             <span>{presentation.detail}</span>
                           </div>
-                          {entry.duration_ms ? <b>{Math.round(entry.duration_ms)} ms</b> : null}
+                          {entry.duration_ms ? <b>{Math.round(entry.duration_ms)} 毫秒</b> : null}
                         </article>
                       );
                     }) : (
@@ -2603,9 +2663,9 @@ function App() {
               <div className="run-layout">
                 <Panel>
                   <PanelHeading
-                    eyebrow="ITEM QUEUE"
+                    eyebrow="文件执行队列"
                     title="文件执行队列"
-                    copy="上传 token、分片进度和 Wiki 任务号会在每一步立即落库。"
+                    copy="上传令牌、分片进度和知识库任务号会在每一步立即写入本地台账。"
                     icon={UploadCloud}
                     tools={
                       <div className="segmented">
@@ -2632,7 +2692,9 @@ function App() {
                           <div className="queue-item__path">
                             <strong>{item.relative_path.split("\\").at(-1)}</strong>
                             <span>{item.relative_path}</span>
-                            {item.error_message ? <small>{item.error_code} · {item.error_message}</small> : null}
+                            {item.error_message ? (
+                              <small>{describeErrorCode(item.error_code)} · {translateTechnicalMessage(item.error_message)}</small>
+                            ) : null}
                           </div>
                           <div className="queue-item__progress">
                             <span>{statusLabel[item.status] ?? item.status}</span>
@@ -2648,12 +2710,12 @@ function App() {
                 </Panel>
                 <div className="side-stack">
                   <Panel>
-                    <PanelHeading eyebrow="REMOTE EVIDENCE" title="对账与审计" icon={SearchCheck} />
+                    <PanelHeading eyebrow="远端证据" title="对账与审计" icon={SearchCheck} />
                     <div className="audit-tools">
                       <Button icon={RefreshCcw} busy={busy === "reconcile"} onClick={reconcile}>立即远端对账</Button>
                       <div>
-                        <Button variant="ghost" icon={Download} busy={busy === "export-csv"} onClick={() => exportAudit("csv")}>CSV</Button>
-                        <Button variant="ghost" icon={Download} busy={busy === "export-json"} onClick={() => exportAudit("json")}>JSON</Button>
+                        <Button variant="ghost" icon={Download} busy={busy === "export-csv"} onClick={() => exportAudit("csv")}>导出表格</Button>
+                        <Button variant="ghost" icon={Download} busy={busy === "export-json"} onClick={() => exportAudit("json")}>导出数据</Button>
                       </div>
                     </div>
                     <div className="timeline">
@@ -2662,10 +2724,10 @@ function App() {
                           <i />
                           <time>{formatLocalTime(event.occurred_at)}</time>
                           <div>
-                            <span>{event.stage}</span>
-                            <strong>{event.message}</strong>
+                            <span>{describeStage(event.stage)}</span>
+                            <strong>{translateTechnicalMessage(event.message)}</strong>
                             {event.relative_path ? <small>{event.relative_path}</small> : null}
-                            {event.evidence ? <code>{event.evidence}</code> : null}
+                            {event.evidence ? <code>{translateTechnicalMessage(event.evidence)}</code> : null}
                           </div>
                         </article>
                       )) : <p className="muted">暂无审计事件。</p>}
@@ -2688,10 +2750,10 @@ function App() {
       </main>
 
       <footer className="statusbar">
-        <span><i className={auth.authorized ? "ok" : "warning"} /> OAuth {auth.authorized ? "READY" : "WAITING"}</span>
-        <span><i className={project ? "ok" : ""} /> SQLITE WAL</span>
-        <span><i className="ok" /> LOCALHOST ONLY</span>
-        <span className="statusbar__right">源目录保护 · READ ONLY</span>
+        <span><i className={auth.authorized ? "ok" : "warning"} /> 用户授权 {auth.authorized ? "已就绪" : "等待中"}</span>
+        <span><i className={project ? "ok" : ""} /> 本地台账安全写入</span>
+        <span><i className="ok" /> 仅限本机访问</span>
+        <span className="statusbar__right">源目录保护 · 只读</span>
       </footer>
 
       {notice ? (

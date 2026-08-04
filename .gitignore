@@ -20,6 +20,7 @@ dist/
 build/
 release/
 .playwright-cli/
+ui-audit/
 
 *.sqlite
 *.sqlite3
