@@ -6,9 +6,8 @@ import hashlib
 import os
 import time
 import uuid
-from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -33,7 +32,11 @@ FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
 MAX_FEISHU_NAME_LENGTH = 250
 MAX_WIKI_LOCAL_DEPTH = 49
 MAX_WIKI_CHILDREN = 2_000
-HASH_BLOCK_SIZE = 4 * 1024 * 1024
+# A reusable 16 MiB buffer materially reduces Python allocations and read
+# syscalls while keeping cancellation responsive.  At the maximum supported
+# 16 workers the upper bound is 256 MiB, which is acceptable for a desktop
+# migration process and avoids loading whole files into memory.
+HASH_BLOCK_SIZE = 16 * 1024 * 1024
 ONEDRIVE_INTERNAL_NAMES = frozenset({".849c9593-d756-4e56-8d6e-42412f2a707b"})
 
 
@@ -215,12 +218,29 @@ def sha256_file(
     block_size: int = HASH_BLOCK_SIZE,
 ) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while block := stream.read(block_size):
+    buffer = bytearray(block_size)
+    view = memoryview(buffer)
+    with path.open("rb", buffering=0) as stream:
+        while read_size := stream.readinto(buffer):
             if cancel_check and cancel_check():
                 raise ScanCancelled("scan cancelled while hashing")
-            digest.update(block)
+            digest.update(view[:read_size])
     return digest.hexdigest()
+
+
+def verify_cached_digest(
+    path: Path,
+    digest: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+) -> str:
+    """Confirm an unchanged cached file is still readable without rehashing it."""
+
+    if cancel_check and cancel_check():
+        raise ScanCancelled("scan cancelled while checking cached file")
+    with path.open("rb", buffering=0) as stream:
+        stream.read(1)
+    return digest
 
 
 def _error_details(exc: OSError, path: Path) -> dict[str, Any]:
@@ -341,6 +361,7 @@ class InventoryScanner:
         cancel: Callable[[], bool] | Any | None = None,
         progress: Callable[[ScanProgress], None] | None = None,
     ) -> ScanResult:
+        scan_started_at = time.perf_counter()
         project = self.store.get_project(project_id)
         root = Path(source_root or project.source_root).expanduser().absolute()
         digest_by_path, digest_by_identity = self._digest_caches(project_id)
@@ -395,7 +416,7 @@ class InventoryScanner:
             max_workers=self.hash_workers,
             thread_name_prefix="folder2feishu-hash",
         )
-        pending_hashes: deque[tuple[_FileCandidate, Future[str]]] = deque()
+        pending_hashes: dict[Future[str], _FileCandidate] = {}
         last_persist_at = time.monotonic()
 
         def flush() -> None:
@@ -452,6 +473,7 @@ class InventoryScanner:
                 or now_monotonic - last_persist_at >= 1.0
             )
             if should_persist:
+                live_elapsed = max(0.001, time.perf_counter() - scan_started_at)
                 self.store.update_job_run(
                     run.id,
                     total_items=scanned,
@@ -464,7 +486,17 @@ class InventoryScanner:
                     summary={
                         "folders": counts["folders"],
                         "files": counts["files"],
+                        "bytes": counts["bytes"],
                         "issues": counts["issues"],
+                        "hashes_computed": hash_stats["hashes_computed"],
+                        "hashes_reused": hash_stats["hashes_reused"],
+                        "hash_workers": self.hash_workers,
+                        "elapsed_seconds": round(live_elapsed, 3),
+                        "items_per_second": round(scanned / live_elapsed, 2),
+                        "megabytes_per_second": round(
+                            counts["bytes"] / 1024 / 1024 / live_elapsed,
+                            2,
+                        ),
                     },
                 )
                 last_persist_at = now_monotonic
@@ -524,7 +556,9 @@ class InventoryScanner:
             digest: str | None = None
             try:
                 digest = future.result()
-                hash_stats["hashes_computed"] += 1
+                hash_stats[
+                    "hashes_reused" if candidate.cached_sha256 is not None else "hashes_computed"
+                ] += 1
             except ScanCancelled:
                 raise
             except OSError as exc:
@@ -541,14 +575,16 @@ class InventoryScanner:
         def drain_hashes(*, force: bool = False) -> None:
             while pending_hashes and (force or len(pending_hashes) >= self.hash_queue_size):
                 check_cancel()
-                candidate, future = pending_hashes.popleft()
-                finish_hash(candidate, future)
+                # Consume whichever file finishes first.  FIFO waiting caused
+                # one large file to hold the scanner producer while many small
+                # hashes were already complete, creating avoidable idle gaps
+                # and a progress display that looked frozen.
+                completed, _ = wait(tuple(pending_hashes), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    candidate = pending_hashes.pop(future)
+                    finish_hash(candidate, future)
 
         def queue_file(candidate: _FileCandidate) -> None:
-            if candidate.cached_sha256 is not None:
-                hash_stats["hashes_reused"] += 1
-                record_file(candidate, candidate.cached_sha256)
-                return
             if (
                 candidate.is_offline
                 or candidate.is_recall_on_open
@@ -556,16 +592,20 @@ class InventoryScanner:
             ):
                 record_file(candidate, None)
                 return
-            pending_hashes.append(
-                (
-                    candidate,
-                    hash_executor.submit(
-                        sha256_file,
-                        candidate.path,
-                        cancel_check=lambda: _is_cancelled(cancel),
-                    ),
+            if candidate.cached_sha256 is not None:
+                future = hash_executor.submit(
+                    verify_cached_digest,
+                    candidate.path,
+                    candidate.cached_sha256,
+                    cancel_check=lambda: _is_cancelled(cancel),
                 )
-            )
+            else:
+                future = hash_executor.submit(
+                    sha256_file,
+                    candidate.path,
+                    cancel_check=lambda: _is_cancelled(cancel),
+                )
+            pending_hashes[future] = candidate
             drain_hashes()
 
         try:
@@ -579,12 +619,15 @@ class InventoryScanner:
                     operational=True,
                 )
             else:
-                stack: list[tuple[Path, str, int]] = [(root, "", 0)]
+                # Carry DirEntry's cached stat result into the directory pass.
+                # Converting every directory to Path and calling stat() again
+                # doubled metadata round-trips on large OneDrive trees.
+                stack: list[tuple[Path, str, int, os.stat_result | None]] = [(root, "", 0, None)]
                 while stack:
                     check_cancel()
-                    directory, rel_path, depth = stack.pop()
+                    directory, rel_path, depth, prefetched_stat = stack.pop()
                     try:
-                        directory_stat = directory.stat(follow_symlinks=False)
+                        directory_stat = prefetched_stat or directory.stat(follow_symlinks=False)
                     except OSError as exc:
                         add_issue(
                             IssueCode.STAT_ERROR,
@@ -682,7 +725,7 @@ class InventoryScanner:
                             },
                         )
 
-                    child_directories: list[tuple[Path, str, int]] = []
+                    child_directories: list[tuple[Path, str, int, os.stat_result | None]] = []
                     for entry in entries:
                         check_cancel()
                         child_rel = f"{rel_path}/{entry.name}" if rel_path else entry.name
@@ -696,7 +739,14 @@ class InventoryScanner:
                                 )
                                 continue
                             if entry.is_dir(follow_symlinks=False):
-                                child_directories.append((Path(entry.path), child_rel, depth + 1))
+                                child_directories.append(
+                                    (
+                                        Path(entry.path),
+                                        child_rel,
+                                        depth + 1,
+                                        entry.stat(follow_symlinks=False),
+                                    )
+                                )
                                 continue
                             if not entry.is_file(follow_symlinks=False):
                                 add_issue(
@@ -738,12 +788,6 @@ class InventoryScanner:
                             by_path=digest_by_path,
                             by_identity=digest_by_identity,
                         )
-                        if cached_sha256 is not None:
-                            try:
-                                with source_path.open("rb") as stream:
-                                    stream.read(1)
-                            except OSError:
-                                cached_sha256 = None
                         queue_file(
                             _FileCandidate(
                                 path=source_path,
@@ -792,9 +836,21 @@ class InventoryScanner:
 
         complete = not cancelled and unexpected_error is None and counts["operational_errors"] == 0
         project_status = ProjectStatus.SCANNED if complete else ProjectStatus.BLOCKED
+        elapsed_seconds = max(0.001, time.perf_counter() - scan_started_at)
         summary = {
             **counts,
             **hash_stats,
+            "hash_workers": self.hash_workers,
+            "hash_block_size": HASH_BLOCK_SIZE,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "items_per_second": round(
+                (counts["folders"] + counts["files"]) / elapsed_seconds,
+                2,
+            ),
+            "megabytes_per_second": round(
+                counts["bytes"] / 1024 / 1024 / elapsed_seconds,
+                2,
+            ),
             "complete": complete,
             "cancelled": cancelled,
             "source_root": str(root),

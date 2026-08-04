@@ -15,8 +15,11 @@ $expanded = Join-Path $testRoot "expanded"
 $installed = Join-Path $testRoot "installed"
 $originalLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $testRoot "localappdata"
-$runtime = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
+$legacyRuntime = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
+$runtime = Join-Path $testRoot "simulated-d-drive\Folder2FeishuDrive\Data"
 New-Item -ItemType Directory -Path $expanded -Force | Out-Null
+New-Item -ItemType Directory -Path $legacyRuntime -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $legacyRuntime "migration-sentinel.txt") -Value "move-me" -Encoding ascii
 
 try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $expanded
@@ -30,10 +33,17 @@ try {
         -ExecutionPolicy Bypass `
         -File $installer.FullName `
         -InstallDir $installed `
+        -RuntimeDir $runtime `
         -NoShortcut `
         -SkipLaunch
     if ($LASTEXITCODE -ne 0) {
         throw "Python 版安装测试失败，退出码：$LASTEXITCODE"
+    }
+    if (Test-Path -LiteralPath $legacyRuntime) {
+        throw "旧版 C 盘运行数据在校验迁移后仍然存在。"
+    }
+    if ((Get-Content -LiteralPath (Join-Path $runtime "migration-sentinel.txt") -Raw).Trim() -ne "move-me") {
+        throw "C 盘运行数据未完整迁移到新的 D 盘目录。"
     }
     if (Test-Path -LiteralPath (Join-Path $installed "Folder2Feishu.exe")) {
         throw "Python 发布包不应包含 Folder2Feishu.exe。"
@@ -42,6 +52,7 @@ try {
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Start-Folder2Feishu.ps1") `
+        -RuntimeDir $runtime `
         -NoBrowser `
         -TimeoutSeconds $TimeoutSeconds
     if ($LASTEXITCODE -ne 0) {
@@ -65,6 +76,7 @@ try {
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Update-Folder2Feishu.ps1") `
         -PackagePath $PackagePath `
+        -RuntimeDir $runtime `
         -NoBrowser
     if ($LASTEXITCODE -ne 0) {
         throw "Python 版离线更新测试失败，退出码：$LASTEXITCODE"
@@ -77,6 +89,7 @@ try {
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Stop-Folder2Feishu.ps1") `
+        -RuntimeDir $runtime `
         -Quiet
     if ($LASTEXITCODE -ne 0) {
         throw "更新测试完成后无法停止 Python 服务。"

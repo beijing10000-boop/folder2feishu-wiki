@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive"),
+    [string]$InstallDir = "D:\Folder2FeishuDrive\App",
+    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data",
     [string]$PythonCommand = "",
     [switch]$NoShortcut,
     [switch]$SkipLaunch
@@ -16,8 +17,31 @@ else {
     (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
-$runtimeDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
+$RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
+$legacyInstallDir = [System.IO.Path]::GetFullPath(
+    (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive")
+)
+$legacyRuntimeDir = [System.IO.Path]::GetFullPath(
+    (Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive")
+)
 $sameLocation = $sourceRoot.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase)
+
+function Assert-TargetDriveExists {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
+
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    if (-not $root -or -not (Test-Path -LiteralPath $root)) {
+        throw "$Purpose target drive is unavailable: $root. Connect or create the drive, then retry."
+    }
+}
+
+Assert-TargetDriveExists -Path $InstallDir -Purpose "Program installation"
+Assert-TargetDriveExists -Path $RuntimeDir -Purpose "Runtime data"
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "folder2feishu\__main__.py"))) {
     throw "Incomplete package: Python application source is missing."
@@ -50,14 +74,100 @@ function Resolve-Python312 {
     return [pscustomobject]@{ Command = $candidate; Arguments = $arguments }
 }
 
-function Stop-InstalledServer {
-    $stopScript = Join-Path $InstallDir "Stop-Folder2Feishu.ps1"
-    if (Test-Path -LiteralPath $stopScript) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -Quiet
-        if ($LASTEXITCODE -ne 0) {
-            throw "The previous version is still running. Stop Folder2Feishu and retry."
+function Stop-InstalledServers {
+    $installations = @($InstallDir, $legacyInstallDir) | Select-Object -Unique
+    foreach ($installation in $installations) {
+        $stopScript = Join-Path $installation "Stop-Folder2Feishu.ps1"
+        if (Test-Path -LiteralPath $stopScript) {
+            if ($installation.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $installation.Equals($legacyInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -RuntimeDir $RuntimeDir -Quiet
+            }
+            else {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -Quiet
+            }
+            if ($LASTEXITCODE -ne 0) {
+                throw "The previous version is still running. Stop Folder2Feishu and retry."
+            }
         }
     }
+}
+
+function Move-LegacyRuntime {
+    if ($legacyRuntimeDir.Equals($RuntimeDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $legacyRuntimeDir)) {
+        New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+        return
+    }
+    if (Test-Path -LiteralPath $RuntimeDir) {
+        $existing = Get-ChildItem -LiteralPath $RuntimeDir -Force -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($existing) {
+            throw "Both the old C: data directory and the new D: data directory contain files. Automatic migration was stopped to prevent overwriting either copy. Back up and reconcile the two directories, then retry."
+        }
+    }
+
+    $runtimeParent = Split-Path $RuntimeDir -Parent
+    New-Item -ItemType Directory -Path $runtimeParent -Force | Out-Null
+    $staging = "$RuntimeDir.migrating-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    try {
+        Get-ChildItem -LiteralPath $legacyRuntimeDir -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $staging -Recurse -Force
+        }
+
+        $sourceFiles = @(Get-ChildItem -LiteralPath $legacyRuntimeDir -File -Recurse -Force)
+        $targetFiles = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force)
+        if ($sourceFiles.Count -ne $targetFiles.Count) {
+            throw "Runtime migration verification failed: file count differs."
+        }
+        foreach ($sourceFile in $sourceFiles) {
+            $relative = $sourceFile.FullName.Substring($legacyRuntimeDir.Length).TrimStart('\')
+            $targetFile = Join-Path $staging $relative
+            if (-not (Test-Path -LiteralPath $targetFile)) {
+                throw "Runtime migration verification failed: missing $relative"
+            }
+            $targetLength = (Get-Item -LiteralPath $targetFile).Length
+            if ($sourceFile.Length -ne $targetLength) {
+                throw "Runtime migration verification failed: size differs for $relative"
+            }
+            $sourceHash = (Get-FileHash -LiteralPath $sourceFile.FullName -Algorithm SHA256).Hash
+            $targetHash = (Get-FileHash -LiteralPath $targetFile -Algorithm SHA256).Hash
+            if ($sourceHash -ne $targetHash) {
+                throw "Runtime migration verification failed: checksum differs for $relative"
+            }
+        }
+
+        if (Test-Path -LiteralPath $RuntimeDir) {
+            Remove-Item -LiteralPath $RuntimeDir -Force
+        }
+        Move-Item -LiteralPath $staging -Destination $RuntimeDir
+        Remove-Item -LiteralPath $legacyRuntimeDir -Recurse -Force
+        Write-Host "Migration data moved from C: to $RuntimeDir" -ForegroundColor Green
+    }
+    catch {
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+        }
+        throw
+    }
+}
+
+function Remove-LegacyInstallation {
+    if ($legacyInstallDir.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $legacyInstallDir)) {
+        return
+    }
+    if ($sourceRoot.Equals($legacyInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warning "The installer is running from the old C: directory, so that program directory was kept. Run the online installer to remove it automatically."
+        return
+    }
+    Remove-Item -LiteralPath $legacyInstallDir -Recurse -Force
+    Write-Host "Old C: program directory removed: $legacyInstallDir" -ForegroundColor Green
 }
 
 function Remove-LegacySchedules {
@@ -81,8 +191,11 @@ function Remove-LegacySchedules {
 }
 
 $python = Resolve-Python312
-Stop-InstalledServer
+Stop-InstalledServers
+Move-LegacyRuntime
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+$env:FOLDER2FEISHU_HOME = $RuntimeDir
 
 $entries = @(
     "folder2feishu",
@@ -146,8 +259,10 @@ if (-not $NoShortcut) {
     $shortcut.Save()
 }
 
+Remove-LegacyInstallation
+
 Write-Host "Folder2Feishu installed at: $InstallDir" -ForegroundColor Green
-Write-Host "Migration ledger and credentials remain at: $runtimeDir" -ForegroundColor Green
+Write-Host "Migration ledger and credentials: $RuntimeDir" -ForegroundColor Green
 
 if (-not $SkipLaunch) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallDir "Start-Folder2Feishu.ps1")

@@ -3,6 +3,7 @@ param(
     [string]$PackagePath = "",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$GitHubToken = "",
+    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data",
     [switch]$IncludePrerelease,
     [switch]$NoBrowser
 )
@@ -10,7 +11,18 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$installDir = $PSScriptRoot
+$legacyInstallDir = [System.IO.Path]::GetFullPath(
+    (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive")
+)
+$installDir = if ($PSScriptRoot.Equals(
+        $legacyInstallDir,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    "D:\Folder2FeishuDrive\App"
+}
+else {
+    $PSScriptRoot
+}
 $temporaryRoot = Join-Path $env:TEMP ("folder2feishu-update-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
 
@@ -60,6 +72,7 @@ try {
         -ExecutionPolicy Bypass `
         -File $installer.FullName `
         -InstallDir $installDir `
+        -RuntimeDir $RuntimeDir `
         -NoShortcut `
         -SkipLaunch
     if ($LASTEXITCODE -ne 0) {
@@ -68,7 +81,8 @@ try {
     $startArguments = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", (Join-Path $installDir "Start-Folder2Feishu.ps1")
+        "-File", (Join-Path $installDir "Start-Folder2Feishu.ps1"),
+        "-RuntimeDir", $RuntimeDir
     )
     if ($NoBrowser) {
         $startArguments += "-NoBrowser"

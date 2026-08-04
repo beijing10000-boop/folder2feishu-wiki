@@ -28,7 +28,7 @@ v3 是独立的新程序：不读取 v2 知识库版的配置、数据库或迁�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.1/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.2/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
@@ -36,16 +36,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubu
 ## 一条命令升级
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Folder2FeishuDrive\Update-Folder2Feishu.ps1" -IncludePrerelease
+powershell -NoProfile -ExecutionPolicy Bypass -File "D:\Folder2FeishuDrive\App\Update-Folder2Feishu.ps1" -IncludePrerelease
 ```
 
 升级会保留 v3 的配置与断点台账。v2 知识库版位于不同目录，不会被覆盖。
 
 ## 运行目录
 
-- 程序：`%LOCALAPPDATA%\Programs\Folder2FeishuDrive`
-- 配置、数据库和日志：`%LOCALAPPDATA%\Folder2FeishuDrive`
-- 日志：`%LOCALAPPDATA%\Folder2FeishuDrive\logs\folder2feishu.log`
+- 程序：`D:\Folder2FeishuDrive\App`
+- 配置、数据库和凭据：`D:\Folder2FeishuDrive\Data`
+- 日志：`D:\Folder2FeishuDrive\Data\logs\folder2feishu.log`
+
+从旧版升级时，安装程序会先停止服务，将 `%LOCALAPPDATA%\Folder2FeishuDrive`
+完整复制到 D 盘并逐文件校验 SHA-256；验证通过后才会删除 C 盘旧数据。
 
 ## 飞书应用配置
 

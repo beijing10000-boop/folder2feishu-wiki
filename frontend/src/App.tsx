@@ -2139,8 +2139,12 @@ function App() {
                       scan.summary.hashes_reused
                         ? `已复用 ${scan.summary.hashes_reused.toLocaleString()} 个文件哈希`
                         : scanActive
-                          ? "首次盘点采用 4 路并发读取"
-                          : "文件内容已完成校验"
+                          ? scan.summary.megabytes_per_second
+                            ? `${scan.summary.hash_workers || 8} 路并发 · 当前 ${scan.summary.megabytes_per_second.toLocaleString()} MB/秒`
+                            : `首次盘点采用 ${scan.summary.hash_workers || 8} 路并发读取`
+                          : scan.summary.megabytes_per_second
+                            ? `平均读取 ${scan.summary.megabytes_per_second.toLocaleString()} MB/秒`
+                            : "文件内容已完成校验"
                     }
                   />
                   <Metric

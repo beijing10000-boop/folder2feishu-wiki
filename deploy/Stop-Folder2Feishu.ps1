@@ -1,8 +1,11 @@
 [CmdletBinding()]
-param([switch]$Quiet)
+param(
+    [switch]$Quiet,
+    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data"
+)
 
 $ErrorActionPreference = "Stop"
-$stateDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
+$stateDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 $pidFile = Join-Path $stateDir "server.pid"
 
 if (-not (Test-Path -LiteralPath $pidFile)) {
