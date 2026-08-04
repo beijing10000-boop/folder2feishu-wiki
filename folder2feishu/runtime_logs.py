@@ -85,6 +85,9 @@ def read_runtime_logs(
                 "duration_ms": parsed.get("duration_ms"),
                 "retry_count": parsed.get("retry_count"),
                 "error_type": str(parsed.get("error_type") or ""),
+                "action_id": str(parsed.get("action_id") or ""),
+                "action_type": str(parsed.get("action_type") or ""),
+                "result": str(parsed.get("result") or ""),
             }
         )
 

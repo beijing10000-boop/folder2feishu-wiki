@@ -209,6 +209,9 @@ export interface RuntimeLogEntry {
   duration_ms?: number;
   retry_count?: number;
   error_type?: string;
+  action_id?: string;
+  action_type?: string;
+  result?: string;
 }
 
 export interface RunSummary {

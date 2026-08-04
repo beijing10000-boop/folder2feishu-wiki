@@ -518,12 +518,15 @@ class MigrationPlanner:
         if item.sha256 != mapping.source_sha256:
             details["content_changed"] = True
             details["relocation_also_required"] = path_changed
-            details["replacement_strategy"] = "archive_old_then_upload_new"
+            details["replacement_strategy"] = "move_old_to_global_history_then_upload_new"
+            details["history_layout"] = (
+                "_Folder2Feishu_历史版本/<原相对目录>/<任务时间>/<原文件名>"
+            )
             return MigrationPlanner._action(
                 item,
                 mapping,
                 ActionType.VERSION_UPDATE,
-                "file content changed; preserve the previous Wiki node as history",
+                "文件内容已更新；旧文件移入统一历史目录，新版保留原路径和原文件名",
                 details=details,
             )
         if path_changed:

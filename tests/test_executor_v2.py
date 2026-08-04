@@ -80,6 +80,84 @@ class FakeDrive:
         return file_token
 
 
+class FakeDirectDrive(FakeDrive):
+    """Small in-memory Drive tree for direct-to-cloud-drive executor tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.nodes: dict[str, dict[str, str]] = {
+            "target-parent": {
+                "parent": "",
+                "name": "目标目录",
+                "type": "folder",
+            }
+        }
+        self.moves = 0
+
+    def create_folder(self, parent_token: str, name: str) -> str:
+        token = f"folder-{len(self.nodes)}"
+        self.nodes[token] = {"parent": parent_token, "name": name, "type": "folder"}
+        return token
+
+    def ensure_folder(self, parent_token: str, name: str) -> str:
+        for token, node in self.nodes.items():
+            if node == {"parent": parent_token, "name": name, "type": "folder"}:
+                return token
+        return self.create_folder(parent_token, name)
+
+    def stage_file(self, local_path: Path, **kwargs: Any) -> StagedFile:
+        parent = str(kwargs["parent_node"])
+        kwargs.pop("probe_existing", None)
+        staged = super().stage_file(local_path, **kwargs)
+        self.nodes[staged.file_token] = {
+            "parent": parent,
+            "name": staged.final_name,
+            "type": "file",
+        }
+        return staged
+
+    def rename_file(self, file_token: str, new_title: str, *, object_type: str = "file") -> str:
+        super().rename_file(file_token, new_title, object_type=object_type)
+        self.nodes[file_token]["name"] = new_title
+        return file_token
+
+    def reconcile_child(
+        self,
+        parent_token: str,
+        *,
+        object_token: str,
+        name: str,
+        object_type: str,
+    ) -> dict[str, Any]:
+        node = self.nodes.get(object_token)
+        differences: list[str] = []
+        if node is None:
+            differences.append("missing")
+        else:
+            if node["parent"] != parent_token:
+                differences.append("parent")
+            if node["name"] != name:
+                differences.append("name")
+            if node["type"] != object_type:
+                differences.append("type")
+        return {"matched": not differences, "differences": differences}
+
+    def move_file(
+        self,
+        token: str,
+        *,
+        object_type: str,
+        destination_folder_token: str,
+    ) -> str:
+        assert self.nodes[token]["type"] == object_type
+        self.moves += 1
+        self.nodes[token]["parent"] = destination_folder_token
+        return f"move-{self.moves}"
+
+    def wait_task(self, task_id: str) -> dict[str, str]:
+        return {"task_id": task_id, "status": "success"}
+
+
 class FakeWiki:
     def __init__(self, drive: FakeDrive) -> None:
         self.drive = drive
@@ -429,6 +507,89 @@ def test_first_run_second_run_move_and_version_update(tmp_path: Path) -> None:
         mapping.remote_status == RemoteStatus.ARCHIVED
         for mapping in store.list_remote_mappings(project_id, current_only=False)
     )
+
+
+def test_drive_version_update_moves_old_file_to_global_history_tree(
+    tmp_path: Path,
+) -> None:
+    store, project_id, _drive, _wiki = _build(tmp_path)
+    drive = FakeDirectDrive()
+    executor = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        FakeWiki(drive),  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "drive-history-quota.json"),
+        drive_direct=True,
+    )
+    first = executor.execute(project_id)
+    assert first.failed == first.conflicts == 0
+    assert drive.uploads == 2
+
+    source = Path(store.get_project(project_id).source_root)
+    changed = source / "部门 A" / "中文 & report (1).xlsx"
+    changed.write_bytes(b"second-version")
+    InventoryScanner(store).scan(project_id)
+    plan = MigrationPlanner(store).build(project_id)
+    action = next(
+        candidate
+        for candidate in store.list_plan_actions(project_id, plan_id=plan.plan_id)
+        if candidate.action_type == ActionType.VERSION_UPDATE
+    )
+    assert action.details["history_layout"].startswith("_Folder2Feishu_历史版本/")
+    _confirm(store, project_id)
+
+    updated = executor.execute(project_id)
+    assert updated.failed == updated.conflicts == 0
+    assert drive.uploads == 3
+    persisted = store.get_plan_action(action.id)
+    history_parent = str(persisted.details["history_parent_token"])
+    timestamp = str(persisted.details["history_timestamp"])
+    assert timestamp
+    assert drive.nodes[history_parent]["name"] == timestamp
+    archived = next(
+        mapping
+        for mapping in store.list_remote_mappings(project_id, current_only=False)
+        if mapping.remote_status == RemoteStatus.ARCHIVED
+        and mapping.last_source_rel_path == "部门 A/中文 & report (1).xlsx"
+    )
+    assert drive.nodes[archived.object_token]["parent"] == history_parent
+    assert drive.nodes[archived.object_token]["name"] == "中文 & report (1).xlsx"
+
+    InventoryScanner(store).scan(project_id)
+    unchanged = MigrationPlanner(store).build(project_id)
+    assert unchanged.counts[ActionType.SKIP.value] == unchanged.total_actions
+    assert drive.uploads == 3
+
+
+def test_unexpected_single_file_error_is_isolated_and_other_files_continue(
+    tmp_path: Path,
+) -> None:
+    store, project_id, _drive, _wiki = _build(tmp_path)
+
+    class OneBrokenFileDrive(FakeDrive):
+        def stage_file(self, local_path: Path, **kwargs: Any) -> StagedFile:
+            if local_path.name == "deck.pptx":
+                raise RuntimeError("synthetic one-file failure")
+            return super().stage_file(local_path, **kwargs)
+
+    drive = OneBrokenFileDrive()
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        FakeWiki(drive),  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "isolated-error-quota.json"),
+    ).execute(project_id)
+
+    assert result.failed == 1
+    assert drive.uploads == 1
+    broken = next(
+        action
+        for action in store.list_plan_actions(project_id)
+        if action.source_rel_path.endswith("deck.pptx")
+    )
+    assert broken.state == MigrationState.RETRYABLE
+    assert broken.details["unexpected_error"] is True
+    assert broken.details["last_error_type"] == "RuntimeError"
 
 
 def test_zero_byte_file_is_reported_and_skipped_without_remote_write(
