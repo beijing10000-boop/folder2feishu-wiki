@@ -519,9 +519,7 @@ class MigrationPlanner:
             details["content_changed"] = True
             details["relocation_also_required"] = path_changed
             details["replacement_strategy"] = "move_old_to_global_history_then_upload_new"
-            details["history_layout"] = (
-                "_Folder2Feishu_历史版本/<原相对目录>/<任务时间>/<原文件名>"
-            )
+            details["history_layout"] = "_Folder2Feishu_历史版本/<原相对目录>/<任务时间>/<原文件名>"
             return MigrationPlanner._action(
                 item,
                 mapping,
