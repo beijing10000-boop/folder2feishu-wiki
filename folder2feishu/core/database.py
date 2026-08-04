@@ -1093,6 +1093,7 @@ class CoreStore:
         mapping_id: str,
         *,
         status: RemoteStatus = RemoteStatus.ARCHIVED,
+        remote_parent_node_token: str | None = None,
     ) -> RemoteMapping:
         with self.session() as session:
             mapping = session.get(RemoteMapping, mapping_id)
@@ -1100,6 +1101,9 @@ class CoreStore:
                 raise KeyError(f"unknown remote mapping: {mapping_id}")
             mapping.is_current = False
             mapping.remote_status = status
+            if remote_parent_node_token is not None:
+                mapping.remote_parent_node_token = remote_parent_node_token
+            mapping.last_verified_at = utc_now()
             mapping.updated_at = utc_now()
             session.flush()
             return mapping

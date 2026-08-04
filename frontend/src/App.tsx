@@ -265,6 +265,30 @@ const describeErrorCode = (code?: string): string => {
 
 const describeRuntimeLog = (entry: RuntimeLogEntry): { title: string; detail: string } => {
   const message = entry.message;
+  const actionLabel: Record<string, string> = {
+    CREATE_FOLDER: "创建目录",
+    UPLOAD: "上传文件",
+    MOVE: "移动文件",
+    RENAME: "文件改名",
+    VERSION_UPDATE: "更新版本",
+    SKIP: "跳过未变化文件",
+    REPORT_MISSING: "记录本地缺失"
+  };
+  if (message === "迁移项开始") {
+    return {
+      title: `${actionLabel[entry.action_type ?? ""] ?? "处理文件"}开始`,
+      detail: entry.path || "正在处理迁移项"
+    };
+  }
+  if (message === "迁移项完成") {
+    return {
+      title: entry.result === "skipped" ? "文件未变化，已跳过" : `${actionLabel[entry.action_type ?? ""] ?? "迁移项"}完成`,
+      detail: entry.path || "迁移项已写入台账"
+    };
+  }
+  if (message.includes("迁移项") && (entry.level === "ERROR" || entry.level === "WARNING")) {
+    return { title: message, detail: entry.path || "详细原因已写入本机日志" };
+  }
   if (message.includes("/upload_part") && message.includes("200 OK")) {
     return { title: "分片上传成功", detail: "飞书已接收一个 4 MB 文件分片" };
   }
@@ -2050,7 +2074,7 @@ function App() {
                     <ul>
                       <li>内容未变：不重复上传</li>
                       <li>仅移动改名：复用原云盘对象</li>
-                      <li>内容变化：旧版进入历史区</li>
+                      <li>内容变化：旧版移入统一历史目录，新版保留原路径和原文件名</li>
                       <li>本地删除：只报告，不删飞书</li>
                     </ul>
                   </div>
@@ -2610,7 +2634,7 @@ function App() {
                   <PanelHeading
                     eyebrow="实时服务日志"
                     title="实时迁移日志"
-                    copy="只增量显示飞书请求、限流、重试和错误；不会重复读取整个日志文件。"
+                    copy="增量显示每个文件的开始、完成、跳过、重试和错误；完整记录同时保存在本机轮转日志中。"
                     icon={SquareTerminal}
                     tools={<span className="live-chip"><i />实时</span>}
                   />

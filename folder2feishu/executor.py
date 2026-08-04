@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -12,6 +13,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
+
+from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from .core import (
     ActionType,
@@ -42,6 +45,9 @@ from .feishu import (
 )
 from .job_control import JobControl, JobStopped
 from .quota import DailyQuotaExceeded, DailyQuotaStore
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MigrationBlocked(RuntimeError):
@@ -611,6 +617,16 @@ class MigrationExecutor:
     ) -> _ActionOutcome:
         """Execute one independent action and durably classify expected failures."""
 
+        started_at = time.monotonic()
+        log_extra = {
+            "task_id": run_id,
+            "stage": "migration_item",
+            "path": action.source_rel_path,
+            "action_id": action.id,
+            "action_type": action.action_type.value,
+            "retry_count": int((action.details or {}).get("retry_count") or 0),
+        }
+        LOGGER.info("迁移项开始", extra=log_extra)
         api = getattr(self.drive, "api", None)
         interruptible = (
             api.interruptible(controller.wait)
@@ -641,6 +657,15 @@ class MigrationExecutor:
                     rel_path=action.source_rel_path,
                     payload={"reset_at": exc.reset_at.isoformat()},
                 )
+                LOGGER.warning(
+                    "迁移项因租户限额暂停",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "result": "paused",
+                    },
+                )
                 return _ActionOutcome(action, quota_paused=True)
             except MigrationBlocked as exc:
                 self.store.update_plan_action(
@@ -656,6 +681,15 @@ class MigrationExecutor:
                     job_run_id=run_id,
                     planned_action_id=action.id,
                     rel_path=action.source_rel_path,
+                )
+                LOGGER.error(
+                    "迁移项冲突，已隔离并继续处理其他文件",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "result": "conflict",
+                    },
                 )
                 return _ActionOutcome(action, conflicts=1)
             except WikiMoveTaskFailedError as exc:
@@ -678,6 +712,15 @@ class MigrationExecutor:
                     job_run_id=run_id,
                     planned_action_id=action.id,
                     rel_path=action.source_rel_path,
+                )
+                LOGGER.error(
+                    "迁移项远端任务失败，已记录并继续处理其他文件",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "result": "retryable" if exc.retryable else "manual_action",
+                    },
                 )
                 return _ActionOutcome(
                     action,
@@ -702,7 +745,75 @@ class MigrationExecutor:
                     planned_action_id=action.id,
                     rel_path=action.source_rel_path,
                 )
+                LOGGER.error(
+                    "迁移项失败，已加入可重试队列并继续处理其他文件",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "result": "retryable",
+                    },
+                )
                 return _ActionOutcome(action, failed=1)
+            except (SQLAlchemyDatabaseError, MemoryError):
+                # A broken ledger or exhausted process memory is a task-wide
+                # safety failure. Continuing would make resume evidence
+                # unreliable, so let the run supervisor stop the task.
+                LOGGER.exception(
+                    "迁移台账或进程资源发生全局故障，任务必须停止",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "result": "fatal",
+                    },
+                )
+                raise
+            except Exception as exc:
+                # Isolate an unexpected problem to this item. The traceback is
+                # kept in the rotating backend log; the UI only receives a
+                # concise, actionable error record.
+                self.store.update_plan_action(
+                    action.id,
+                    state=MigrationState.RETRYABLE,
+                    merge_details={
+                        "last_error_type": type(exc).__name__,
+                        "last_error": str(exc),
+                        "unexpected_error": True,
+                    },
+                )
+                self.store.append_audit(
+                    project.id,
+                    "migration.unexpected_item_error",
+                    str(exc),
+                    level=AuditLevel.ERROR,
+                    job_run_id=run_id,
+                    planned_action_id=action.id,
+                    rel_path=action.source_rel_path,
+                )
+                LOGGER.exception(
+                    "迁移项出现未预期异常，已隔离并继续处理其他文件",
+                    extra={
+                        **log_extra,
+                        "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                        "error_type": type(exc).__name__,
+                        "result": "retryable",
+                    },
+                )
+                return _ActionOutcome(action, failed=1)
+        LOGGER.info(
+            "迁移项完成",
+            extra={
+                **log_extra,
+                "duration_ms": round((time.monotonic() - started_at) * 1000, 2),
+                "processed": 1,
+                "bytes": item_bytes,
+                "result": (
+                    "skipped"
+                    if action.action_type in {ActionType.SKIP, ActionType.REPORT_MISSING}
+                    else "completed"
+                ),
+            },
+        )
         return _ActionOutcome(
             action,
             item_bytes=item_bytes,
@@ -990,7 +1101,35 @@ class MigrationExecutor:
             item,
             parent_override=destination_parent,
         )
-        history_parent = self._ensure_drive_history_parent(project, item, wrapper)
+        current_action = self.store.get_plan_action(action.id)
+        details = dict(current_action.details or {})
+        history_parent = str(details.get("history_parent_token") or "")
+        history_timestamp = str(details.get("history_timestamp") or "")
+        if not history_timestamp:
+            history_timestamp = self._history_timestamp(current_action)
+        if not history_parent:
+            history_parent = self._ensure_drive_history_parent(
+                project,
+                item,
+                wrapper,
+                history_timestamp=history_timestamp,
+            )
+            history_relative_path = str(
+                PurePosixPath(
+                    "_Folder2Feishu_历史版本",
+                    _parent_rel_path(item.rel_path) or "",
+                    history_timestamp,
+                    item.name,
+                )
+            )
+            self.store.update_plan_action(
+                action.id,
+                merge_details={
+                    "history_timestamp": history_timestamp,
+                    "history_parent_token": history_parent,
+                    "history_relative_path": history_relative_path,
+                },
+            )
         old_token = old.object_token or old.wiki_node_token
         archived = self.drive.reconcile_child(
             history_parent,
@@ -1006,7 +1145,25 @@ class MigrationExecutor:
                 destination_folder_token=history_parent,
             )
             self.drive.wait_task(task_id)
-        self.store.mark_remote_mapping_historical(old.id)
+            archived = self.drive.reconcile_child(
+                history_parent,
+                object_token=old_token,
+                name=old.remote_title,
+                object_type="file",
+            )
+            if not archived["matched"]:
+                raise MigrationBlocked("旧文件移入统一历史目录后对账失败")
+        self.store.update_plan_action(
+            action.id,
+            merge_details={
+                "history_archived": True,
+                "history_file_token": old_token,
+            },
+        )
+        self.store.mark_remote_mapping_historical(
+            old.id,
+            remote_parent_node_token=history_parent,
+        )
         self.store.upsert_remote_mapping(
             project_id=project.id,
             inventory_item_id=item.id,
@@ -1031,6 +1188,8 @@ class MigrationExecutor:
         project: Project,
         item: InventoryItem,
         wrapper: RemoteMapping,
+        *,
+        history_timestamp: str,
     ) -> str:
         parent = self.drive.ensure_folder(
             wrapper.object_token or wrapper.wiki_node_token,
@@ -1038,8 +1197,16 @@ class MigrationExecutor:
         )
         for part in PurePosixPath(_parent_rel_path(item.rel_path) or "").parts:
             parent = self.drive.ensure_folder(parent, part)
-        timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
-        return self.drive.ensure_folder(parent, timestamp)
+        return self.drive.ensure_folder(parent, history_timestamp)
+
+    @staticmethod
+    def _history_timestamp(action: PlannedAction) -> str:
+        """Return a retry-stable local timestamp for a version archive folder."""
+
+        created_at = action.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        return created_at.astimezone().strftime("%Y%m%d_%H%M%S")
 
     def _create_folder(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
         parent_token = self._destination_parent(project, item.rel_path)
@@ -1357,7 +1524,12 @@ class MigrationExecutor:
         if not details.get("old_archived"):
             history_parent = str(details.get("history_parent_token") or "")
             if not history_parent:
-                history_parent = self._ensure_history_parent(project, item, wrapper)
+                history_parent = self._ensure_history_parent(
+                    project,
+                    item,
+                    wrapper,
+                    history_timestamp=self._history_timestamp(action),
+                )
                 self.store.update_plan_action(
                     action.id,
                     merge_details={"history_parent_token": history_parent},
@@ -1445,7 +1617,12 @@ class MigrationExecutor:
         self.store.update_plan_action(action.id, state=MigrationState.DONE)
 
     def _ensure_history_parent(
-        self, project: Project, item: InventoryItem, wrapper: RemoteMapping
+        self,
+        project: Project,
+        item: InventoryItem,
+        wrapper: RemoteMapping,
+        *,
+        history_timestamp: str,
     ) -> str:
         parent = str(
             self.wiki.ensure_docx_node(
@@ -1459,9 +1636,12 @@ class MigrationExecutor:
             parent = str(
                 self.wiki.ensure_docx_node(project.target_space_id, part, parent)["node_token"]
             )
-        timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
         return str(
-            self.wiki.ensure_docx_node(project.target_space_id, timestamp, parent)["node_token"]
+            self.wiki.ensure_docx_node(
+                project.target_space_id,
+                history_timestamp,
+                parent,
+            )["node_token"]
         )
 
     def _verify_source_unchanged(self, project: Project, item: InventoryItem) -> Path:

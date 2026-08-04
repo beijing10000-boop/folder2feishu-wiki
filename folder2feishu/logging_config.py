@@ -45,6 +45,11 @@ class JsonFormatter(logging.Formatter):
             "duration_ms",
             "retry_count",
             "error_type",
+            "action_id",
+            "action_type",
+            "result",
+            "bytes",
+            "remote_token",
         ):
             value = getattr(record, key, None)
             if value not in (None, ""):
@@ -63,8 +68,10 @@ def configure_logging(paths: RuntimePaths, level: int = logging.INFO) -> None:
     formatter = JsonFormatter()
     file_handler = RotatingFileHandler(
         paths.logs / "folder2feishu.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
+        # Keep enough local evidence for multiple large migration runs without
+        # allowing logs to grow forever.
+        maxBytes=20 * 1024 * 1024,
+        backupCount=10,
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
