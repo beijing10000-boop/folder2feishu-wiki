@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$NoBrowser,
-    [string]$RuntimeDir = "",
+    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data",
     [ValidateRange(5, 120)]
     [int]$TimeoutSeconds = 45
 )
@@ -18,12 +18,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $installDir "frontend\dist\index.htm
     throw "Web assets are missing. Reinstall or update Folder2Feishu."
 }
 
-$stateDir = if ($RuntimeDir) {
-    [System.IO.Path]::GetFullPath($RuntimeDir)
-}
-else {
-    Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
-}
+$stateDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 $pidFile = Join-Path $stateDir "server.pid"
 
@@ -39,10 +34,7 @@ if (Test-Path -LiteralPath $pidFile) {
     Remove-Item -LiteralPath $pidFile -Force
 }
 
-$arguments = @("-m", "folder2feishu", "--no-browser")
-if ($RuntimeDir) {
-    $arguments += @("--runtime-dir", $stateDir)
-}
+$arguments = @("-m", "folder2feishu", "--no-browser", "--runtime-dir", $stateDir)
 $stdout = Join-Path $stateDir "launcher-output.log"
 $stderr = Join-Path $stateDir "launcher-error.log"
 $process = Start-Process `

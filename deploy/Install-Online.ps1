@@ -2,7 +2,8 @@
 param(
     [string]$Version = "v3.0.0-rc.2",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive")
+    [string]$InstallDir = "D:\Folder2FeishuDrive\App",
+    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +53,8 @@ try {
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File $installer.FullName `
-        -InstallDir $InstallDir
+        -InstallDir $InstallDir `
+        -RuntimeDir $RuntimeDir
     if ($LASTEXITCODE -ne 0) {
         throw "安装失败，退出码：$LASTEXITCODE"
     }
