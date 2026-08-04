@@ -44,7 +44,7 @@ D:\Team FabDazzle - 文档
 目标电脑已安装 64 位 Python 3.12 时，可在 PowerShell 粘贴一条命令在线安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.6/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v2.0.0-rc.7/deploy/Install-Online.ps1' | iex"
 ```
 
 脚本会从 GitHub Release 下载指定版本、校验 SHA-256、解压并安装。目标电脑不需要
@@ -124,6 +124,13 @@ DPAPI 凭据、配置、日志和审计导出不会被覆盖。
 - 分片进度读取现有 SQLite 断点台账，刷新页面或重启服务不会丢失。
 - 页面增量显示飞书上传、限流冷却、重试和错误日志，不再要求打开 PowerShell。
 - 日志接口只读取新增的结构化记录并限制数量，避免大日志拖慢页面。
+
+### 2.0.0-rc.7 全中文企业控制台
+
+- 五个核心页面、导航、状态、表单、按钮、提示和运行日志统一为中文展示。
+- 配置验证由拥挤的单行卡片改为三列分组，差异动作改为四列布局，长中文说明更易阅读。
+- 统一页面宽度、卡片边界、表格列宽、运行状态区、队列密度和桌面端响应式规则。
+- 飞书接口英文错误会转换为中文说明；用户自己的文件名、目录名和标准文件扩展名保持原样。
 
 ### 2.0.0-rc.5 飞书限流恢复修复
 

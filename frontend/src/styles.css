@@ -4383,3 +4383,307 @@ textarea::placeholder {
     grid-column: 1 / -1;
   }
 }
+
+/* 2026-08 中文企业控制台统一：只调整视觉层，不改变页面结构和业务行为。 */
+.workspace {
+  width: min(1600px, 100%);
+  padding-inline: clamp(24px, 3vw, 48px);
+}
+
+.workspace-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
+  gap: 24px;
+  align-items: start;
+}
+
+.workspace-heading > div:first-child,
+.panel-heading__text,
+.config-overview__title > div,
+.run-marquee__summary {
+  min-width: 0;
+}
+
+.sequence,
+.eyebrow,
+.project-plate > span,
+.scope-rack__label,
+.step-rail__title span,
+.confirmation-seal,
+.data-table__head {
+  letter-spacing: 0.035em;
+  text-transform: none;
+}
+
+.project-plate {
+  width: 100%;
+  min-width: 0;
+}
+
+.config-overview__head {
+  gap: 24px;
+  align-items: center;
+}
+
+.config-overview__actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.validation-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.validation-item {
+  min-height: 132px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.validation-item:nth-child(3n) {
+  border-right: 0;
+}
+
+.validation-item:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.validation-item strong,
+.validation-item p,
+.validation-item small {
+  line-height: 1.5;
+}
+
+.validation-item strong {
+  font-size: 0.78rem;
+}
+
+.validation-item small {
+  font-size: 0.66rem;
+}
+
+.validation-item p {
+  margin-top: 8px;
+  font-size: 0.68rem;
+}
+
+.config-operations-grid,
+.view-grid,
+.inventory-layout,
+.preflight-layout,
+.plan-layout,
+.run-layout,
+.run-live-grid {
+  align-items: start;
+}
+
+.panel-heading {
+  min-height: 88px;
+  padding: 18px 20px;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.panel-heading h2 {
+  line-height: 1.35;
+}
+
+.panel-heading p {
+  max-width: 760px;
+  line-height: 1.55;
+}
+
+.metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metric {
+  min-width: 0;
+  min-height: 112px;
+  padding: 18px;
+}
+
+.metric__label,
+.metric small,
+.progress-panel__bottom,
+.quota-panel__copy {
+  line-height: 1.45;
+}
+
+.action-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.action-counter {
+  min-height: 104px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.action-counter > span {
+  color: #475467;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.action-counter small {
+  color: #7b8794;
+  font-family: inherit;
+  font-size: 0.62rem;
+}
+
+.data-table__head,
+.data-table__row {
+  grid-template-columns: 120px minmax(280px, 1.3fr) minmax(260px, 1fr) 100px;
+  gap: 16px;
+  padding-inline: 18px;
+}
+
+.data-table__head {
+  font-size: 0.65rem;
+}
+
+.data-table__row {
+  min-height: 60px;
+  color: #475467;
+  font-size: 0.7rem;
+}
+
+.run-marquee {
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 20px;
+  padding: 20px;
+}
+
+.run-status-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px 20px;
+}
+
+.run-status-grid__current {
+  grid-column: 1 / -1;
+}
+
+.run-marquee__controls {
+  align-self: center;
+  justify-content: flex-end;
+}
+
+.run-metrics {
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+.queue-item {
+  grid-template-columns: 34px minmax(0, 1fr) minmax(180px, 240px) 52px;
+  gap: 14px;
+  min-height: 76px;
+  padding-inline: 18px;
+}
+
+.queue-item__path strong,
+.queue-item__path span,
+.queue-item__path small {
+  line-height: 1.45;
+}
+
+.timeline__event strong,
+.timeline__event small,
+.timeline__event code,
+.runtime-log-row strong,
+.runtime-log-row span {
+  line-height: 1.45;
+}
+
+.statusbar {
+  gap: 22px;
+  padding-inline: 20px;
+  font-family: inherit;
+  font-size: 0.65rem;
+  letter-spacing: 0.02em;
+}
+
+@media (max-width: 1380px) {
+  .workspace {
+    padding-inline: 28px;
+  }
+
+  .validation-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .validation-item:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+
+  .validation-item:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .validation-item:nth-last-child(-n + 3) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .validation-item:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .run-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .workspace-heading {
+    grid-template-columns: minmax(0, 1fr) 220px;
+  }
+
+  .metric-grid,
+  .action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-marquee {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .run-marquee__controls {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    padding-inline: 20px;
+  }
+
+  .workspace-heading,
+  .validation-grid,
+  .metric-grid,
+  .action-grid,
+  .run-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .validation-item,
+  .validation-item:nth-child(2n),
+  .validation-item:nth-child(3n),
+  .validation-item:nth-last-child(-n + 2),
+  .validation-item:nth-last-child(-n + 3) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .validation-item:last-child {
+    border-bottom: 0;
+  }
+
+  .project-plate {
+    width: min(100%, 360px);
+  }
+}

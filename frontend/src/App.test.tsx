@@ -133,6 +133,27 @@ describe("配置优先迁移向导", () => {
     expect(within(rail).getByText("预检").closest("button")).toBeDisabled();
   });
 
+  it("核心控制台标签统一使用中文展示", async () => {
+    render(<App />);
+
+    expect(await screen.findByText("必要配置检查")).toBeInTheDocument();
+    expect(screen.getByText("应用凭据")).toBeInTheDocument();
+    expect(screen.getByText("固定操作身份")).toBeInTheDocument();
+    expect(screen.getByText("速率控制")).toBeInTheDocument();
+    expect(screen.getByText("单向迁移路径")).toBeInTheDocument();
+    expect(screen.getByText("用户授权 等待中")).toBeInTheDocument();
+
+    [
+      "MANDATORY CONFIG GATE",
+      "APPLICATION CREDENTIALS",
+      "FIXED OPERATOR IDENTITY",
+      "RATE CONTROL",
+      "ONE-WAY MIGRATION ROUTE",
+      "LOCALHOST ONLY",
+      "READ ONLY"
+    ].forEach((label) => expect(screen.queryByText(label)).not.toBeInTheDocument());
+  });
+
   it("已有大目录的后台数据未返回时也立即显示主界面", async () => {
     const project: Project = {
       id: "project-large-inventory",
