@@ -46,6 +46,7 @@ from .job_control import HeartbeatPump, JobSnapshot
 from .observability import METRICS, request_id_var
 from .quota import DailyQuotaStore
 from .runtime import bundled_path
+from .runtime_logs import read_runtime_logs
 from .settings import PublicSettings
 from .web_security import LocalRequestGuard, new_csrf_token
 
@@ -217,6 +218,34 @@ def _job_payload(
     eta_seconds = None
     if processed > 0 and run.total_items > processed and elapsed_seconds > 0:
         eta_seconds = int(elapsed_seconds / processed * (run.total_items - processed))
+    active_uploads: list[dict[str, Any]] = []
+    if run.plan_id:
+        for upload, action in services.store.list_active_upload_progress(
+            run.project_id,
+            run.plan_id,
+            limit=max(4, int(run_summary.get("workers", 0))),
+        ):
+            completed_parts = len(set(upload.completed_parts or []))
+            uploaded_bytes = min(upload.file_size, completed_parts * upload.part_size)
+            active_uploads.append(
+                {
+                    "action_id": action.id,
+                    "relative_path": action.source_rel_path or action.destination_rel_path,
+                    "status": upload.status.value,
+                    "completed_parts": completed_parts,
+                    "total_parts": upload.total_parts,
+                    "uploaded_bytes": uploaded_bytes,
+                    "total_bytes": upload.file_size,
+                    "percent": (
+                        round(completed_parts / upload.total_parts * 100, 1)
+                        if upload.total_parts
+                        else 0
+                    ),
+                    "attempts": upload.attempts,
+                    "last_error": upload.last_error,
+                    "updated_at": upload.updated_at.isoformat(),
+                }
+            )
     return {
         "id": run.id,
         "run_id": run.id,
@@ -249,6 +278,7 @@ def _job_payload(
         "bytes_total": run.bytes_total,
         "bytes_completed": run.bytes_completed,
         "eta_seconds": eta_seconds,
+        "active_uploads": active_uploads,
         "quota": {
             "upload_calls_used": quota.used,
             "upload_calls_limit": quota.budget,
@@ -853,6 +883,17 @@ def create_app(
                 finished_at=utc_now(),
             )
         return _job_payload(services, run_id, snapshot)
+
+    @app.get("/api/v2/runtime/logs")
+    def runtime_logs(
+        after: int | None = Query(default=None, ge=0),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return read_runtime_logs(
+            services.paths.logs / "folder2feishu.log",
+            after=after,
+            limit=limit,
+        )
 
     @app.post("/api/v2/runs/{run_id}/pause")
     def pause_run(run_id: str, _: EmptyCommand) -> dict[str, Any]:

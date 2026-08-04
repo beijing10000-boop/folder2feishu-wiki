@@ -1189,6 +1189,30 @@ class CoreStore:
                 .limit(1)
             )
 
+    def list_active_upload_progress(
+        self,
+        project_id: str,
+        plan_id: str,
+        *,
+        limit: int = 8,
+    ) -> list[tuple[UploadSession, PlannedAction]]:
+        """Return only live multipart sessions for the current immutable plan."""
+
+        with self.session() as session:
+            rows = session.execute(
+                select(UploadSession, PlannedAction)
+                .join(PlannedAction, PlannedAction.id == UploadSession.planned_action_id)
+                .where(
+                    UploadSession.project_id == project_id,
+                    PlannedAction.plan_id == plan_id,
+                    PlannedAction.state == MigrationState.UPLOADING,
+                    UploadSession.status.in_((UploadStatus.PREPARED, UploadStatus.UPLOADING)),
+                )
+                .order_by(UploadSession.updated_at.desc())
+                .limit(min(max(int(limit), 1), 32))
+            )
+            return [(upload, action) for upload, action in rows]
+
     def record_upload_progress(
         self,
         planned_action_id: str,

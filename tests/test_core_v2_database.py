@@ -122,6 +122,10 @@ def test_database_schema_pragmas_serialization_and_crud(tmp_path):
         assert progress.move_task_id == "task-id"
         assert progress.attempts == 1
         assert store.get_upload_session_for_action(action.id).id == upload.id
+        active_uploads = store.list_active_upload_progress(project.id, "plan-1")
+        assert len(active_uploads) == 1
+        assert active_uploads[0][0].completed_parts == [1]
+        assert active_uploads[0][1].source_rel_path == "设计/样衣.xlsx"
 
         assert (
             store.find_current_remote_mapping(project.id, rel_path="设计/样衣.xlsx").id

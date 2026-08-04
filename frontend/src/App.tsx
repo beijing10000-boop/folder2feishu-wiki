@@ -36,11 +36,12 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  SquareTerminal,
   Square,
   UploadCloud,
   Waypoints
 } from "lucide-react";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api/client";
 import type {
   AppSettings,
@@ -51,6 +52,7 @@ import type {
   PreflightResult,
   Project,
   ProjectDraft,
+  RuntimeLogEntry,
   RunItem,
   RunSummary,
   ScanResult,
@@ -206,6 +208,32 @@ const describeStage = (stage?: string): string => {
     return actionLabel[action] ? `正在${actionLabel[action]}` : "正在迁移项目";
   }
   return stage;
+};
+
+const describeRuntimeLog = (entry: RuntimeLogEntry): { title: string; detail: string } => {
+  const message = entry.message;
+  if (message.includes("/upload_part") && message.includes("200 OK")) {
+    return { title: "分片上传成功", detail: "飞书已接收一个4MB文件分片" };
+  }
+  if (message.includes("/upload_prepare") && message.includes("200 OK")) {
+    return { title: "分片会话已建立", detail: "飞书已返回大文件上传策略" };
+  }
+  if (message.includes("/upload_finish") && message.includes("200 OK")) {
+    return { title: "大文件上传完成", detail: "全部分片已在飞书云盘合并" };
+  }
+  if (message.includes("/upload_all") && message.includes("200 OK")) {
+    return { title: "文件上传成功", detail: "飞书云盘已接收文件" };
+  }
+  if (message.includes("rate limit") || message.includes("bucket deferred")) {
+    return { title: "触发限流保护", detail: "程序正在按飞书返回时间自动冷却重试" };
+  }
+  if (message.includes("timeout") || (entry.error_type ?? "").toLowerCase().includes("timeout")) {
+    return { title: "网络请求超时", detail: `程序已进入受控重试${entry.retry_count ? ` · 第${entry.retry_count}次` : ""}` };
+  }
+  return {
+    title: entry.level === "ERROR" ? "远端请求失败" : "迁移服务记录",
+    detail: entry.path || message
+  };
 };
 
 const emptySettings: AppSettings = {
@@ -529,6 +557,8 @@ function App() {
   const [backgroundTask, setBackgroundTask] = useState<RunSummary>();
   const [runItems, setRunItems] = useState<RunItem[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
+  const runtimeLogCursor = useRef<number>();
   const [validation, setValidation] = useState<ValidationState>(emptyValidation);
   const [actionFilter, setActionFilter] = useState<PlannedActionKind | "ALL">("ALL");
   const [runFilter, setRunFilter] = useState<"ALL" | "FAILED" | "ACTIVE">("ALL");
@@ -716,6 +746,39 @@ function App() {
       }
     };
     void poll();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [run?.id, run?.state]);
+
+  useEffect(() => {
+    if (!run) return;
+    let alive = true;
+    let timer = 0;
+    runtimeLogCursor.current = undefined;
+    setRuntimeLogs([]);
+
+    const pollLogs = async () => {
+      try {
+        const response = await api.getRuntimeLogs(runtimeLogCursor.current);
+        if (!alive) return;
+        runtimeLogCursor.current = response.next_after;
+        setRuntimeLogs((current) => {
+          const next = response.reset ? response.entries : [...current, ...response.entries];
+          const unique = new Map(next.map((entry) => [entry.id, entry]));
+          return Array.from(unique.values()).slice(-160);
+        });
+      } catch {
+        // Runtime log display is observational and must never affect migration execution.
+      } finally {
+        if (alive && run.state === "RUNNING") {
+          timer = window.setTimeout(pollLogs, document.hidden ? 5_000 : 2_000);
+        }
+      }
+    };
+
+    void pollLogs();
     return () => {
       alive = false;
       window.clearTimeout(timer);
@@ -2468,6 +2531,72 @@ function App() {
                   <div className="quota-panel__copy">
                     <span>Wiki 节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
                     <span>飞书平台限额仍生效；限流自动冷却重试</span>
+                  </div>
+                </Panel>
+              </div>
+              <div className="run-live-grid">
+                <Panel className="upload-progress-panel">
+                  <PanelHeading
+                    eyebrow="MULTIPART UPLOAD"
+                    title="大文件分片进度"
+                    copy="每个分片成功后立即写入本地台账；页面刷新或服务重启后仍可继续显示。"
+                    icon={UploadCloud}
+                    tools={<span className="live-chip"><i />{run.active_uploads.length} 个大文件上传中</span>}
+                  />
+                  {run.active_uploads.length ? (
+                    <div className="upload-progress-list">
+                      {run.active_uploads.map((upload) => (
+                        <article className="upload-progress-row" key={upload.action_id}>
+                          <div className="upload-progress-row__path">
+                            <strong title={upload.relative_path}>{upload.relative_path.split("\\").at(-1)}</strong>
+                            <span title={upload.relative_path}>{upload.relative_path}</span>
+                          </div>
+                          <div className="upload-progress-row__numbers">
+                            <b>{upload.completed_parts.toLocaleString()} / {upload.total_parts.toLocaleString()} 分片</b>
+                            <span>{formatBytes(upload.uploaded_bytes)} / {formatBytes(upload.total_bytes)}</span>
+                          </div>
+                          <div className="upload-progress-row__bar" aria-label={`上传进度 ${upload.percent}%`}>
+                            <i style={{ width: `${Math.min(100, upload.percent)}%` }} />
+                          </div>
+                          <strong className="upload-progress-row__percent">{formatPercent(upload.completed_parts, upload.total_parts)}%</strong>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="upload-progress-empty">
+                      <CheckCircle2 />
+                      <span>当前没有进行中的分片上传；小于等于20MB的文件会直接上传。</span>
+                    </div>
+                  )}
+                </Panel>
+                <Panel className="runtime-log-panel">
+                  <PanelHeading
+                    eyebrow="LIVE SERVICE LOG"
+                    title="实时迁移日志"
+                    copy="只增量显示飞书请求、限流、重试和错误；不会重复读取整个日志文件。"
+                    icon={SquareTerminal}
+                    tools={<span className="live-chip"><i />LIVE</span>}
+                  />
+                  <div className="runtime-log-list" aria-live="polite">
+                    {runtimeLogs.length ? [...runtimeLogs].reverse().map((entry) => {
+                      const presentation = describeRuntimeLog(entry);
+                      return (
+                        <article className={`runtime-log-row is-${entry.level.toLowerCase()}`} key={entry.id}>
+                          <time>{formatLocalTime(entry.occurred_at)}</time>
+                          <i />
+                          <div>
+                            <strong>{presentation.title}</strong>
+                            <span>{presentation.detail}</span>
+                          </div>
+                          {entry.duration_ms ? <b>{Math.round(entry.duration_ms)} ms</b> : null}
+                        </article>
+                      );
+                    }) : (
+                      <div className="runtime-log-empty">
+                        <LoaderCircle className={run.state === "RUNNING" ? "spin" : ""} />
+                        <span>{run.state === "RUNNING" ? "等待下一条飞书请求记录…" : "当前没有新的运行日志"}</span>
+                      </div>
+                    )}
                   </div>
                 </Panel>
               </div>
