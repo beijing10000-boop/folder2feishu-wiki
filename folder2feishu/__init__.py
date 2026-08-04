@@ -7,4 +7,4 @@ folder into Feishu Drive while retaining the original hierarchy.
 
 from __future__ import annotations
 
-__version__ = "3.0.0rc2"
+__version__ = "3.0.0rc3"

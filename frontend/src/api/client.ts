@@ -240,7 +240,11 @@ const normalizeRun = (raw: Record<string, any>): RunSummary => {
     conflicts: raw.conflicts ?? progress.conflicts ?? 0,
     bytes_total: raw.bytes_total ?? progress.bytes_total ?? 0,
     bytes_completed: raw.bytes_completed ?? progress.bytes_completed ?? 0,
+    ledger_bytes_completed: raw.ledger_bytes_completed,
     eta_seconds: raw.eta_seconds ?? raw.eta,
+    eta_item_seconds: raw.eta_item_seconds,
+    eta_bytes_seconds: raw.eta_bytes_seconds,
+    eta_basis: raw.eta_basis,
     active_uploads: Array.isArray(raw.active_uploads)
       ? raw.active_uploads.map((upload: Record<string, any>) => ({
           action_id: String(upload.action_id ?? ""),
@@ -289,7 +293,7 @@ export const api = {
       redirect_uri: value.redirect_uri ?? "http://127.0.0.1:8000/oauth/callback",
       scopes: value.scopes ?? [],
       app_secret_configured: value.app_secret_configured ?? value.secret_configured ?? false,
-      upload_qps: Number(value.upload_qps ?? 4),
+      upload_qps: Number(value.upload_qps ?? 5),
       wiki_calls_per_minute: Number(value.wiki_calls_per_minute ?? 100),
       daily_upload_budget: Number(value.daily_upload_budget ?? 0)
     })),
@@ -302,7 +306,7 @@ export const api = {
       redirect_uri: saved.redirect_uri,
       scopes: saved.scopes ?? [],
       app_secret_configured: saved.app_secret_configured ?? saved.secret_configured ?? false,
-      upload_qps: Number(saved.upload_qps ?? 4),
+      upload_qps: Number(saved.upload_qps ?? 5),
       wiki_calls_per_minute: Number(saved.wiki_calls_per_minute ?? 100),
       daily_upload_budget: Number(saved.daily_upload_budget ?? 0)
     })),

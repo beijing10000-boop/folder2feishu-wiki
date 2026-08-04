@@ -23,11 +23,11 @@ class PublicSettings:
     scopes: list[str] = field(default_factory=lambda: list(DEFAULT_SCOPES))
     host: str = "127.0.0.1"
     port: int = 8000
-    upload_qps: float = 4.0
+    upload_qps: float = 5.0
     wiki_calls_per_minute: int = 100  # 兼容旧接口；云盘版不再使用知识库限速器
     daily_upload_budget: int = 0
     open_browser: bool = True
-    runtime_tuning_version: int = 2
+    runtime_tuning_version: int = 3
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> PublicSettings:
@@ -41,7 +41,14 @@ class PublicSettings:
             and int(payload.get("wiki_calls_per_minute", 90)) == 90
         ):
             payload["wiki_calls_per_minute"] = 100
-        payload["runtime_tuning_version"] = 2
+        # v3 raises only the previous built-in 4 QPS default to Feishu's
+        # documented 5 QPS ceiling. Deliberately lower operator values remain.
+        if (
+            int(value.get("runtime_tuning_version", 1)) < 3
+            and float(payload.get("upload_qps", 4.0)) == 4.0
+        ):
+            payload["upload_qps"] = 5.0
+        payload["runtime_tuning_version"] = 3
         # Older releases persisted a conservative 9,500-call application budget.
         # The migration worker now runs without an application-level daily cap.
         payload["daily_upload_budget"] = 0
@@ -60,8 +67,8 @@ class PublicSettings:
         if not required.issubset(set(self.scopes)):
             missing = ", ".join(sorted(required - set(self.scopes)))
             raise ValueError(f"缺少必需的飞书权限：{missing}")
-        if not 0 < float(self.upload_qps) <= 4.0:
-            raise ValueError("上传速率必须大于 0 且不超过 4 QPS")
+        if not 0 < float(self.upload_qps) <= 5.0:
+            raise ValueError("上传速率必须大于 0 且不超过 5 QPS")
         if not 1 <= int(self.wiki_calls_per_minute) <= 100:
             raise ValueError("知识库调用频率必须在 1 到 100 次/分钟之间")
         if int(self.daily_upload_budget) != 0:

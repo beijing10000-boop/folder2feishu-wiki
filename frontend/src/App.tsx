@@ -294,7 +294,7 @@ const emptySettings: AppSettings = {
   redirect_uri: "http://127.0.0.1:8000/oauth/callback",
   scopes: DEFAULT_SCOPES,
   app_secret_configured: false,
-  upload_qps: 4,
+  upload_qps: 5,
   wiki_calls_per_minute: 100,
   daily_upload_budget: 0
 };
@@ -725,7 +725,7 @@ function App() {
           throttle: {
             status:
               currentSettings.upload_qps > 0 &&
-              currentSettings.upload_qps <= 4
+              currentSettings.upload_qps <= 5
                 ? "passed"
                 : "idle",
             message: "云盘上传速率已加载；触发飞书限流时会自动退避"
@@ -945,7 +945,7 @@ function App() {
   const throttleConfigurationValid = (): boolean =>
     Number.isFinite(settings.upload_qps) &&
     settings.upload_qps > 0 &&
-    settings.upload_qps <= 4;
+    settings.upload_qps <= 5;
 
   const validateApp = async (): Promise<boolean> => {
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
@@ -1844,7 +1844,7 @@ function App() {
                       <input
                         type="number"
                         min="0.1"
-                        max="4"
+                        max="5"
                         step="0.1"
                         value={settings.upload_qps}
                         onChange={(event) => {

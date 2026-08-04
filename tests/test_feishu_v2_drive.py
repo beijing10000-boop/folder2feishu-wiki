@@ -213,9 +213,11 @@ def test_upload_all_always_sends_nonempty_parent_and_persists_before_rename(tmp_
     source = tmp_path / "中文 & report.pdf"
     source.write_bytes(b"content")
     events = []
+    seen_requests: list[httpx.Request] = []
     hooks = CapturingHooks()
 
     def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
         if request.method == "GET":
             return httpx.Response(
                 200,
@@ -244,6 +246,7 @@ def test_upload_all_always_sends_nonempty_parent_and_persists_before_rename(tmp_
         project_id="project-A",
         item_key="folder/中文 & report.pdf",
         hooks=hooks,
+        probe_existing=False,
     )
     assert staged.file_token == "file-1"
     assert staged.final_name == source.name
@@ -251,6 +254,7 @@ def test_upload_all_always_sends_nonempty_parent_and_persists_before_rename(tmp_
         "project-A", "folder/中文 & report.pdf", source.name
     )
     assert events == ["uploaded", "renamed"]
+    assert not any(request.method == "GET" for request in seen_requests)
 
 
 def test_upload_all_5xx_is_reconciled_by_staging_name_without_reposting(tmp_path):

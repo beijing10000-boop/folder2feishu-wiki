@@ -215,10 +215,11 @@ def _job_payload(
     )
     run_summary = dict(run.summary or {})
     processed = run.completed_items + run.failed_items
-    eta_seconds = None
+    item_eta_seconds = None
     if processed > 0 and run.total_items > processed and elapsed_seconds > 0:
-        eta_seconds = int(elapsed_seconds / processed * (run.total_items - processed))
+        item_eta_seconds = int(elapsed_seconds / processed * (run.total_items - processed))
     active_uploads: list[dict[str, Any]] = []
+    active_uploaded_bytes = 0
     if run.plan_id:
         for upload, action in services.store.list_active_upload_progress(
             run.project_id,
@@ -227,6 +228,7 @@ def _job_payload(
         ):
             completed_parts = len(set(upload.completed_parts or []))
             uploaded_bytes = min(upload.file_size, completed_parts * upload.part_size)
+            active_uploaded_bytes += uploaded_bytes
             active_uploads.append(
                 {
                     "action_id": action.id,
@@ -246,6 +248,36 @@ def _job_payload(
                     "updated_at": upload.updated_at.isoformat(),
                 }
             )
+    effective_bytes_completed = min(
+        run.bytes_total,
+        run.bytes_completed + active_uploaded_bytes,
+    )
+    byte_eta_seconds = None
+    if (
+        effective_bytes_completed > 0
+        and run.bytes_total > effective_bytes_completed
+        and elapsed_seconds > 0
+    ):
+        byte_eta_seconds = int(
+            elapsed_seconds
+            / effective_bytes_completed
+            * (run.bytes_total - effective_bytes_completed)
+        )
+    # Mixed workloads contain many tiny files and a small number of very large
+    # files. Item-count ETA is too optimistic at the large-file tail, while a
+    # byte-only ETA can be optimistic for metadata-heavy tiny files. Report the
+    # more conservative estimate and expose both components for diagnostics.
+    eta_candidates = [value for value in (item_eta_seconds, byte_eta_seconds) if value is not None]
+    eta_seconds = max(eta_candidates) if eta_candidates else None
+    eta_basis = (
+        "items_and_bytes"
+        if item_eta_seconds is not None and byte_eta_seconds is not None
+        else "bytes"
+        if byte_eta_seconds is not None
+        else "items"
+        if item_eta_seconds is not None
+        else "unavailable"
+    )
     return {
         "id": run.id,
         "run_id": run.id,
@@ -276,8 +308,12 @@ def _job_payload(
             "failed": run.failed_items,
         },
         "bytes_total": run.bytes_total,
-        "bytes_completed": run.bytes_completed,
+        "bytes_completed": effective_bytes_completed,
+        "ledger_bytes_completed": run.bytes_completed,
         "eta_seconds": eta_seconds,
+        "eta_item_seconds": item_eta_seconds,
+        "eta_bytes_seconds": byte_eta_seconds,
+        "eta_basis": eta_basis,
         "active_uploads": active_uploads,
         "quota": {
             "upload_calls_used": quota.used,

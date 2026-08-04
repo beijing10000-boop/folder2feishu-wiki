@@ -499,13 +499,20 @@ class DriveService:
         original_name: str | None = None,
         resume_session: UploadSession | None = None,
         hooks: PersistenceHooks | None = None,
+        probe_existing: bool = True,
     ) -> StagedFile:
         path = Path(local_path)
         final_name = _validate_file_name(original_name or path.name)
         internal_name = deterministic_staging_name(project_id, item_key, final_name)
         active_hooks = hooks or NullPersistenceHooks()
 
-        existing_token = self.reconcile_staging_upload(parent_node, internal_name)
+        # A fresh ledger action cannot have committed a remote staging object,
+        # so listing the complete destination folder before every upload only
+        # adds latency. Recovery/retry paths keep the deterministic-name probe
+        # that prevents a lost HTTP response from creating a duplicate.
+        existing_token = (
+            self.reconcile_staging_upload(parent_node, internal_name) if probe_existing else None
+        )
         if existing_token:
             active_hooks.on_file_token(existing_token)
             self.rename_file(existing_token, final_name)

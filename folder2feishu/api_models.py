@@ -40,7 +40,7 @@ class SettingsRead(ApiModel):
     secret_configured: bool = False
     host: str = "127.0.0.1"
     port: int = 8000
-    upload_qps: float = 4.0
+    upload_qps: float = 5.0
     wiki_calls_per_minute: int = 100
     daily_upload_budget: int = 0
 
@@ -50,7 +50,7 @@ class SettingsUpdate(WriteApiModel):
     app_secret: str | None = Field(default=None, min_length=1)
     redirect_uri: str = "http://localhost:8000/oauth/callback"
     scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_SCOPES))
-    upload_qps: float = Field(default=4.0, gt=0, le=4.0)
+    upload_qps: float = Field(default=5.0, gt=0, le=5.0)
     wiki_calls_per_minute: int = Field(default=100, ge=1, le=100)
     # Kept in the wire format for rolling upgrades; the service stores 0
     # and applies no application-side daily call cap.
