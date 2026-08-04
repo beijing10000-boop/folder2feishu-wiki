@@ -41,7 +41,7 @@ def _show_startup_error(message: str) -> None:
         ctypes.windll.user32.MessageBoxW(
             None,
             message,
-            "Folder2Feishu Wiki",
+            "Folder2Feishu 云盘迁移",
             0x10,  # MB_ICONERROR
         )
     except Exception:
@@ -51,7 +51,7 @@ def _show_startup_error(message: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="Folder2Feishu",
-        description="把 Windows 本地目录按原层级安全迁移到飞书知识库",
+        description="把 Windows 本地目录按原层级安全迁移到飞书云盘",
     )
     parser.add_argument(
         "--run-project",

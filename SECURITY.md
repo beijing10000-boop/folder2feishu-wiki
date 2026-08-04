@@ -1,6 +1,6 @@
 # 安全说明
 
-Folder2Feishu Wiki 是只在 Windows 本机运行的迁移工具。它会获得飞书用户授权，
+Folder2Feishu Drive 是只在 Windows 本机运行的迁移工具。它会获得飞书用户授权，
 因此按“本机高权限工具”处理，而不是普通公开网站。
 
 ## 安全边界
@@ -21,12 +21,12 @@ Folder2Feishu Wiki 是只在 Windows 本机运行的迁移工具。它会获得�
 在控制台执行“退出飞书授权”，并在飞书应用管理后台撤销用户授权。随后删除：
 
 ```text
-%LOCALAPPDATA%\Folder2FeishuWikiNext\credentials.bin
+%LOCALAPPDATA%\Folder2FeishuDrive\credentials.bin
 ```
 
 删除凭据不会删除迁移台账或飞书文件。重新授权后可以继续使用已有 token 映射。
 
 ## 漏洞报告
 
-请不要在公开 Issue 中提交 App Secret、token、知识库 URL 或包含业务文件名的日志。
+请不要在公开 Issue 中提交 App Secret、token、云盘文件夹 URL 或包含业务文件名的日志。
 通过仓库的 Security 页面私下报告，并提供版本号、复现步骤和已脱敏日志。

@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_DIR_NAME = "Folder2FeishuWikiNext"
+APP_DIR_NAME = "Folder2FeishuDrive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ class RuntimePaths:
         elif local_app_data := os.environ.get("LOCALAPPDATA"):
             base = (Path(local_app_data) / APP_DIR_NAME).resolve()
         else:
-            base = (Path.home() / ".folder2feishu-wiki").resolve()
+            base = (Path.home() / ".folder2feishu-drive").resolve()
         return cls(
             base=base,
             database=base / "ledger.sqlite3",

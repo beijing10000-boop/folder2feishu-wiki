@@ -11,7 +11,6 @@ DEFAULT_SCOPES = (
     "offline_access",
     "drive:drive",
     "drive:file:upload",
-    "wiki:wiki",
     "drive:quota_detail:read_one",
     "contact:user.employee_id:readonly",
 )
@@ -25,7 +24,7 @@ class PublicSettings:
     host: str = "127.0.0.1"
     port: int = 8000
     upload_qps: float = 4.0
-    wiki_calls_per_minute: int = 100
+    wiki_calls_per_minute: int = 100  # 兼容旧接口；云盘版不再使用知识库限速器
     daily_upload_budget: int = 0
     open_browser: bool = True
     runtime_tuning_version: int = 2

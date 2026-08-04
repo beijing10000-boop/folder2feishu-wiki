@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 from .core import (
     ActionType,
@@ -195,18 +196,21 @@ class MigrationExecutor:
         self,
         store: CoreStore,
         drive: DriveService,
-        wiki: WikiService,
+        wiki: WikiService | None,
         quota: DailyQuotaStore,
         *,
         max_workers: int = DEFAULT_MIGRATION_WORKERS,
+        drive_direct: bool = False,
     ) -> None:
         if max_workers < 1 or max_workers > 8:
             raise ValueError("migration worker count must be between 1 and 8")
         self.store = store
         self.drive = drive
-        self.wiki = wiki
+        # v3 云盘直传不会调用旧知识库分支；旧分支仅保留兼容测试。
+        self.wiki = cast(WikiService, wiki)
         self.quota = quota
         self.max_workers = int(max_workers)
+        self.drive_direct = bool(drive_direct)
         self._folder_token_cache: dict[tuple[str, str], str] = {}
 
     def execute(
@@ -241,7 +245,9 @@ class MigrationExecutor:
             raise MigrationBlocked("当前差异计划尚未最终确认")
         if guard["blocking"]:
             raise MigrationBlocked(f"计划包含 {guard['blocking']} 个冲突或人工处理项")
-        if not project.target_space_id or not project.target_parent_node_token:
+        if not project.target_parent_node_token:
+            raise MigrationBlocked("目标云盘文件夹尚未通过预检")
+        if not self.drive_direct and not project.target_space_id:
             raise MigrationBlocked("目标知识库尚未通过预检")
 
         if durable_run is None:
@@ -708,6 +714,9 @@ class MigrationExecutor:
         *,
         index: int,
     ) -> None:
+        if self.drive_direct:
+            self._execute_drive_action(project, action, item, index=index)
+            return
         if action.action_type in {ActionType.SKIP, ActionType.REPORT_MISSING}:
             self.store.update_plan_action(action.id, state=MigrationState.DONE)
             return
@@ -749,6 +758,300 @@ class MigrationExecutor:
             self._version_update(project, action, item, index=index)
             return
         raise MigrationBlocked(f"不支持的计划动作：{action.action_type.value}")
+
+    def _execute_drive_action(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem | None,
+        *,
+        index: int,
+    ) -> None:
+        if action.action_type in {ActionType.SKIP, ActionType.REPORT_MISSING}:
+            self.store.update_plan_action(action.id, state=MigrationState.DONE)
+            return
+        if item is None:
+            raise MigrationBlocked("计划项缺少本地盘点记录")
+        if action.action_type == ActionType.CREATE_FOLDER:
+            self._create_drive_folder(project, action, item)
+            return
+        if action.action_type == ActionType.UPLOAD:
+            file_token = self._upload_drive_file(project, action, item)
+            destination_parent = self._destination_parent(project, item.rel_path)
+            self.store.complete_plan_action_with_mapping(
+                action.id,
+                wiki_node_token=file_token,
+                object_token=file_token,
+                mapping_values={
+                    "project_id": project.id,
+                    "inventory_item_id": item.id,
+                    "item_kind": ItemKind.FILE,
+                    "last_source_rel_path": item.rel_path,
+                    "source_file_identity": item.file_identity,
+                    "source_sha256": item.sha256,
+                    "source_size": item.size,
+                    "wiki_space_id": "drive",
+                    "wiki_node_token": file_token,
+                    "object_token": file_token,
+                    "remote_parent_node_token": destination_parent,
+                    "remote_title": item.name,
+                    "remote_status": RemoteStatus.ACTIVE,
+                    "last_verified_at": utc_now(),
+                    "is_current": True,
+                },
+            )
+            return
+        if action.action_type in {ActionType.MOVE, ActionType.RENAME}:
+            self._move_or_rename_drive(project, action, item)
+            return
+        if action.action_type == ActionType.VERSION_UPDATE:
+            self._version_update_drive(project, action, item)
+            return
+        raise MigrationBlocked(f"不支持的云盘计划动作：{action.action_type.value}")
+
+    def _create_drive_folder(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+    ) -> None:
+        parent_token = self._destination_parent(project, item.rel_path)
+        title = project.wrapper_name if item.rel_path == "" else item.name
+        current, direct_create = self.store.prepare_folder_create_action(action.id)
+        token = current.object_token or current.wiki_node_token
+        if token:
+            result = self.drive.reconcile_child(
+                parent_token,
+                object_token=token,
+                name=title,
+                object_type="folder",
+            )
+            if not result["matched"]:
+                raise MigrationBlocked(
+                    "已记录的云盘目录与预期不一致：" + ",".join(result["differences"])
+                )
+        elif not direct_create:
+            token = self.drive.ensure_folder(parent_token, title)
+        else:
+            try:
+                token = self.drive.create_folder(parent_token, title)
+            except FeishuAmbiguousWriteError:
+                token = self.drive.ensure_folder(parent_token, title)
+        self.store.complete_plan_action_with_mapping(
+            action.id,
+            wiki_node_token=token,
+            object_token=token,
+            mapping_values={
+                "project_id": project.id,
+                "inventory_item_id": item.id,
+                "item_kind": ItemKind.FOLDER,
+                "last_source_rel_path": item.rel_path,
+                "source_file_identity": item.file_identity,
+                "source_sha256": None,
+                "source_size": None,
+                "wiki_space_id": "drive",
+                "wiki_node_token": token,
+                "object_token": token,
+                "remote_parent_node_token": parent_token,
+                "remote_title": title,
+                "remote_status": RemoteStatus.ACTIVE,
+                "last_verified_at": utc_now(),
+                "is_current": True,
+            },
+            merge_details={"drive_folder_token": token},
+        )
+        self._folder_token_cache[(project.id, item.rel_path)] = token
+
+    def _upload_drive_file(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+        *,
+        parent_override: str | None = None,
+    ) -> str:
+        source = self._verify_source_unchanged(project, item)
+        parent_token = parent_override or self._destination_parent(project, item.rel_path)
+        hooks = LedgerPersistenceHooks(
+            self.store,
+            project_id=project.id,
+            planned_action_id=action.id,
+            idempotency_key=item.id,
+            upload_attempt=self._reserve_upload_attempt,
+        )
+        current = self.store.get_plan_action(action.id)
+        token = current.drive_file_token or current.object_token or current.wiki_node_token
+        if token:
+            result = self.drive.reconcile_child(
+                parent_token,
+                object_token=token,
+                name=item.name,
+                object_type="file",
+            )
+            if result["matched"]:
+                return token
+            internal_name = deterministic_staging_name(project.id, item.id, item.name)
+            internal = self.drive.reconcile_child(
+                parent_token,
+                object_token=token,
+                name=internal_name,
+                object_type="file",
+            )
+            if not internal["matched"]:
+                raise MigrationBlocked(
+                    "已记录的云盘文件被移动、改名或删除：" + ",".join(result["differences"])
+                )
+            self.drive.rename_file(token, item.name, object_type="file")
+        else:
+            self.store.update_plan_action(
+                action.id,
+                state=MigrationState.UPLOADING,
+                merge_details={"destination_parent_token": parent_token},
+            )
+            staged = self.drive.stage_file(
+                source,
+                parent_node=parent_token,
+                project_id=project.id,
+                item_key=item.id,
+                original_name=item.name,
+                resume_session=hooks.resume_upload_session(),
+                hooks=hooks,
+            )
+            token = staged.file_token
+        result = self.drive.reconcile_child(
+            parent_token,
+            object_token=token,
+            name=item.name,
+            object_type="file",
+        )
+        if not result["matched"]:
+            raise MigrationBlocked("文件上传后云盘对账失败：" + ",".join(result["differences"]))
+        self.store.update_plan_action(action.id, state=MigrationState.VERIFYING)
+        return token
+
+    def _move_or_rename_drive(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+    ) -> None:
+        mapping = self._mapping_for_action(action)
+        token = mapping.object_token or mapping.wiki_node_token
+        destination_parent = self._destination_parent(project, item.rel_path)
+        intended = self.drive.reconcile_child(
+            destination_parent,
+            object_token=token,
+            name=item.name,
+            object_type="folder" if item.kind == ItemKind.FOLDER else "file",
+        )
+        if not intended["matched"]:
+            self._assert_mapping_unchanged(mapping)
+            object_type = "folder" if item.kind == ItemKind.FOLDER else "file"
+            if mapping.remote_parent_node_token != destination_parent:
+                task_id = self.drive.move_file(
+                    token,
+                    object_type=object_type,
+                    destination_folder_token=destination_parent,
+                )
+                self.drive.wait_task(task_id)
+            if mapping.remote_title != item.name:
+                self.drive.rename_file(token, item.name, object_type=object_type)
+        verified = self.drive.reconcile_child(
+            destination_parent,
+            object_token=token,
+            name=item.name,
+            object_type="folder" if item.kind == ItemKind.FOLDER else "file",
+        )
+        if not verified["matched"]:
+            raise MigrationBlocked("云盘移动或改名后对账失败")
+        self.store.upsert_remote_mapping(
+            id=mapping.id,
+            project_id=project.id,
+            inventory_item_id=item.id,
+            item_kind=item.kind,
+            last_source_rel_path=item.rel_path,
+            source_file_identity=item.file_identity,
+            source_sha256=item.sha256,
+            source_size=item.size,
+            wiki_space_id="drive",
+            wiki_node_token=token,
+            object_token=token,
+            remote_parent_node_token=destination_parent,
+            remote_title=item.name,
+            remote_status=RemoteStatus.ACTIVE,
+            conflict_reason="",
+            last_verified_at=utc_now(),
+            is_current=True,
+        )
+        self.store.update_plan_action(action.id, state=MigrationState.DONE)
+
+    def _version_update_drive(
+        self,
+        project: Project,
+        action: PlannedAction,
+        item: InventoryItem,
+    ) -> None:
+        old = self._mapping_for_action(action)
+        wrapper = self.store.find_current_remote_mapping(project.id, rel_path="")
+        if wrapper is None:
+            raise MigrationBlocked("找不到项目云盘根目录")
+        destination_parent = self._destination_parent(project, item.rel_path)
+        new_token = self._upload_drive_file(
+            project,
+            action,
+            item,
+            parent_override=destination_parent,
+        )
+        history_parent = self._ensure_drive_history_parent(project, item, wrapper)
+        old_token = old.object_token or old.wiki_node_token
+        archived = self.drive.reconcile_child(
+            history_parent,
+            object_token=old_token,
+            name=old.remote_title,
+            object_type="file",
+        )
+        if not archived["matched"]:
+            self._assert_mapping_unchanged(old)
+            task_id = self.drive.move_file(
+                old_token,
+                object_type="file",
+                destination_folder_token=history_parent,
+            )
+            self.drive.wait_task(task_id)
+        self.store.mark_remote_mapping_historical(old.id)
+        self.store.upsert_remote_mapping(
+            project_id=project.id,
+            inventory_item_id=item.id,
+            item_kind=ItemKind.FILE,
+            last_source_rel_path=item.rel_path,
+            source_file_identity=item.file_identity,
+            source_sha256=item.sha256,
+            source_size=item.size,
+            wiki_space_id="drive",
+            wiki_node_token=new_token,
+            object_token=new_token,
+            remote_parent_node_token=destination_parent,
+            remote_title=item.name,
+            remote_status=RemoteStatus.ACTIVE,
+            last_verified_at=utc_now(),
+            is_current=True,
+        )
+        self.store.update_plan_action(action.id, state=MigrationState.DONE)
+
+    def _ensure_drive_history_parent(
+        self,
+        project: Project,
+        item: InventoryItem,
+        wrapper: RemoteMapping,
+    ) -> str:
+        parent = self.drive.ensure_folder(
+            wrapper.object_token or wrapper.wiki_node_token,
+            "_Folder2Feishu_历史版本",
+        )
+        for part in PurePosixPath(_parent_rel_path(item.rel_path) or "").parts:
+            parent = self.drive.ensure_folder(parent, part)
+        timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
+        return self.drive.ensure_folder(parent, timestamp)
 
     def _create_folder(self, project: Project, action: PlannedAction, item: InventoryItem) -> None:
         parent_token = self._destination_parent(project, item.rel_path)
@@ -1199,8 +1502,9 @@ class MigrationExecutor:
             raise MigrationBlocked(f"目标父目录尚未建立：{parent_rel or project.wrapper_name}")
         if mapping.remote_status != RemoteStatus.ACTIVE:
             raise MigrationBlocked("目标父目录远端状态异常")
-        self._folder_token_cache[cache_key] = mapping.wiki_node_token
-        return mapping.wiki_node_token
+        token = mapping.object_token or mapping.wiki_node_token
+        self._folder_token_cache[cache_key] = token
+        return token
 
     def _mapping_for_action(self, action: PlannedAction) -> RemoteMapping:
         if not action.remote_mapping_id:
@@ -1208,6 +1512,34 @@ class MigrationExecutor:
         return self.store.get_remote_mapping(action.remote_mapping_id)
 
     def _assert_mapping_unchanged(self, mapping: RemoteMapping) -> None:
+        if self.drive_direct:
+            drive_result = self.drive.reconcile_child(
+                mapping.remote_parent_node_token,
+                object_token=mapping.object_token or mapping.wiki_node_token,
+                name=mapping.remote_title,
+                object_type="folder" if mapping.item_kind == ItemKind.FOLDER else "file",
+            )
+            if not drive_result["matched"]:
+                missing = "missing" in drive_result["differences"]
+                self.store.upsert_remote_mapping(
+                    id=mapping.id,
+                    remote_status=RemoteStatus.MISSING if missing else RemoteStatus.CONFLICT,
+                    conflict_reason=(
+                        "飞书云盘对象已被人工删除" if missing else "飞书云盘对象已被人工移动或改名"
+                    ),
+                )
+                raise MigrationBlocked(
+                    "飞书云盘对象已被人工删除"
+                    if missing
+                    else "飞书云盘对象已被人工修改：" + ",".join(drive_result["differences"])
+                )
+            self.store.upsert_remote_mapping(
+                id=mapping.id,
+                remote_status=RemoteStatus.ACTIVE,
+                conflict_reason="",
+                last_verified_at=utc_now(),
+            )
+            return
         result = self.wiki.reconcile_node(
             mapping.wiki_node_token,
             expected_space_id=mapping.wiki_space_id,
@@ -1258,17 +1590,20 @@ class MigrationExecutor:
 
 
 class RemoteReconciler:
-    """Read back every current Wiki mapping and mark manual drift as conflict."""
+    """Read back every current remote mapping and mark manual drift as conflict."""
 
     def __init__(
         self,
         store: CoreStore,
         drive: DriveService,
-        wiki: WikiService,
+        wiki: WikiService | None,
+        *,
+        drive_direct: bool = False,
     ) -> None:
         self.store = store
         self.drive = drive
         self.wiki = wiki
+        self.drive_direct = bool(drive_direct)
 
     def reconcile(
         self,
@@ -1300,7 +1635,7 @@ class RemoteReconciler:
                     status=RunStatus.RUNNING,
                     total_items=total,
                     current_stage="REMOTE_RECONCILIATION",
-                    last_message="正在回读飞书知识库节点",
+                    last_message="正在回读飞书云盘对象",
                     started_at=run.started_at or utc_now(),
                     heartbeat_at=utc_now(),
                     finished_at=None,
@@ -1334,25 +1669,49 @@ class RemoteReconciler:
                         last_message=f"正在校验第 {processed + 1:,} / {total:,} 个节点",
                         heartbeat_at=utc_now(),
                     )
-                    result = self.wiki.reconcile_node(
-                        mapping.wiki_node_token,
-                        expected_space_id=mapping.wiki_space_id,
-                        expected_parent_token=mapping.remote_parent_node_token,
-                        expected_title=mapping.remote_title,
-                        expected_obj_token=mapping.object_token or None,
-                    )
-                    if result.status == ReconcileStatus.MATCH:
+                    if self.drive_direct:
+                        drive_result = self.drive.reconcile_child(
+                            mapping.remote_parent_node_token,
+                            object_token=mapping.object_token or mapping.wiki_node_token,
+                            name=mapping.remote_title,
+                            object_type=(
+                                "folder" if mapping.item_kind == ItemKind.FOLDER else "file"
+                            ),
+                        )
+                        result_status = (
+                            ReconcileStatus.MATCH
+                            if drive_result["matched"]
+                            else ReconcileStatus.MISSING
+                            if "missing" in drive_result["differences"]
+                            else ReconcileStatus.CONFLICT
+                        )
+                    else:
+                        if self.wiki is None:
+                            raise MigrationBlocked("知识库服务未配置")
+                        wiki_result = self.wiki.reconcile_node(
+                            mapping.wiki_node_token,
+                            expected_space_id=mapping.wiki_space_id,
+                            expected_parent_token=mapping.remote_parent_node_token,
+                            expected_title=mapping.remote_title,
+                            expected_obj_token=mapping.object_token or None,
+                        )
+                        result_status = wiki_result.status
+                    if result_status == ReconcileStatus.MATCH:
                         matched += 1
                         status = RemoteStatus.ACTIVE
                         reason = ""
-                    elif result.status == ReconcileStatus.MISSING:
+                    elif result_status == ReconcileStatus.MISSING:
                         missing += 1
                         status = RemoteStatus.MISSING
                         reason = "飞书节点不存在"
                     else:
                         conflicts += 1
                         status = RemoteStatus.CONFLICT
-                        reason = "远端差异：" + ",".join(result.differences)
+                        reason = "远端差异：" + ",".join(
+                            drive_result["differences"]
+                            if self.drive_direct
+                            else wiki_result.differences
+                        )
                     self.store.upsert_remote_mapping(
                         id=mapping.id,
                         remote_status=status,

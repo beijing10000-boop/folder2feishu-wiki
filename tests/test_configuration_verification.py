@@ -20,6 +20,7 @@ from folder2feishu.security import MemoryCredentialStore
 from folder2feishu.settings import DEFAULT_SCOPES
 from folder2feishu.verification import (
     verify_app_credentials,
+    verify_drive_target,
     verify_oauth_identity,
     verify_source_root,
     verify_wiki_target,
@@ -122,7 +123,7 @@ def test_invalid_app_credentials_return_a_generic_error_without_secrets() -> Non
 
 
 def test_oauth_verification_requires_all_scopes_before_user_info() -> None:
-    provider = _provider(scopes=set(DEFAULT_SCOPES) - {"wiki:wiki"})
+    provider = _provider(scopes=set(DEFAULT_SCOPES) - {"drive:file:upload"})
     called = False
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -132,7 +133,7 @@ def test_oauth_verification_requires_all_scopes_before_user_info() -> None:
 
     api, http = _api(handler)
     try:
-        with pytest.raises(Exception, match="wiki:wiki"):
+        with pytest.raises(Exception, match="drive:file:upload"):
             verify_oauth_identity(provider, DriveService(api))
     finally:
         api.close()
@@ -197,7 +198,7 @@ def test_oauth_and_wiki_target_use_real_read_only_openapi_calls() -> None:
         api.close()
         http.close()
 
-    assert oauth_result.details == {"user_name": "迁移管理员", "scope_count": 6}
+    assert oauth_result.details == {"user_name": "迁移管理员", "scope_count": 5}
     assert "ou_internal_id_not_for_browser" not in json.dumps(
         oauth_result.as_dict(),
         ensure_ascii=False,
@@ -206,6 +207,49 @@ def test_oauth_and_wiki_target_use_real_read_only_openapi_calls() -> None:
     assert target_result.details["node_token"] == "WikiParentToken99"
     assert target_result.details["container_edit_requires_pilot"] is True
     assert not any("nodes/create" in path for path in paths)
+
+
+def test_drive_target_verification_reads_selected_folder_without_writing() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/open-apis/authen/v1/user_info":
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"user_id": "user-1", "name": "迁移管理员"}},
+            )
+        if request.url.path == "/open-apis/drive/v1/files":
+            assert request.url.params["folder_token"] == "DriveFolderToken99"
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "files": [{"token": "child-1", "name": "现有资料", "type": "folder"}],
+                        "has_more": False,
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    provider = _provider()
+    api, http = _api(handler)
+    drive = DriveService(api)
+    try:
+        result = verify_drive_target(
+            "https://example.feishu.cn/drive/folder/DriveFolderToken99",
+            token_provider=provider,
+            drive=drive,
+        )
+    finally:
+        api.close()
+        http.close()
+
+    assert result.ok is True
+    assert result.details["folder_token"] == "DriveFolderToken99"
+    assert result.details["child_count"] == 1
+    assert not any(path.endswith("/create_folder") for path in paths)
 
 
 def test_source_verification_is_shallow_and_rejects_runtime_inside_source(

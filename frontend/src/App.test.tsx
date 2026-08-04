@@ -42,7 +42,6 @@ const scopes = [
   "offline_access",
   "drive:drive",
   "drive:file:upload",
-  "wiki:wiki",
   "drive:quota_detail:read_one",
   "contact:user.employee_id:readonly"
 ];
@@ -76,7 +75,7 @@ describe("配置优先迁移向导", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     apiMock.getSession.mockResolvedValue({ ready: true });
-    apiMock.health.mockResolvedValue({ ok: true, version: "2.0-test" });
+    apiMock.health.mockResolvedValue({ ok: true, version: "3.0-test" });
     apiMock.getSettings.mockResolvedValue(emptySettings);
     apiMock.getAuthStatus.mockResolvedValue(emptyAuth);
     apiMock.listProjects.mockResolvedValue([]);
@@ -90,8 +89,8 @@ describe("配置优先迁移向导", () => {
     apiMock.verifyOauth.mockResolvedValue({
       ok: true,
       kind: "oauth",
-      message: "OAuth 固定操作身份与六项权限已验证：迁移管理员",
-      details: { user_name: "迁移管理员", scope_count: 6 }
+      message: "用户授权固定操作身份与五项权限已验证：迁移管理员",
+      details: { user_name: "迁移管理员", scope_count: 5 }
     });
     apiMock.verifySource.mockResolvedValue({
       ok: true,
@@ -102,11 +101,10 @@ describe("配置优先迁移向导", () => {
     apiMock.verifyTarget.mockResolvedValue({
       ok: true,
       kind: "target",
-      message: "已读取知识库目标并确认页面编辑权限",
+      message: "已读取云盘目标文件夹",
       details: {
-        space_id: "space",
-        node_token: "WikiParentToken",
-        page_editable: true,
+        folder_token: "DriveFolderToken",
+        child_count: 0,
         container_edit_requires_pilot: true
       }
     });
@@ -118,13 +116,13 @@ describe("配置优先迁移向导", () => {
 
     expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
     expect(screen.getByText("飞书应用与本机安全配置")).toBeInTheDocument();
-    expect(screen.getByText("上传与知识库并发速率")).toBeInTheDocument();
-    expect(screen.getByText("唯一来源、唯一落点与安全增量")).toBeInTheDocument();
+    expect(screen.getByText("云盘上传速率")).toBeInTheDocument();
+    expect(screen.getByText("唯一来源、唯一云盘落点与安全增量")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证应用配置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证当前身份" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证并保存并发速率" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证本地目录配置" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "验证知识库地址" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "验证云盘文件夹" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "验证安全策略" })).toBeInTheDocument();
 
     const rail = screen.getByLabelText("迁移步骤");
@@ -159,7 +157,7 @@ describe("配置优先迁移向导", () => {
       id: "project-large-inventory",
       name: "FabDazzle 全量迁移",
       source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
-      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      target_wiki_url: "https://example.feishu.cn/drive/folder/DriveFolderToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
       mode: "safe_incremental"
@@ -212,7 +210,7 @@ describe("配置优先迁移向导", () => {
       id: "project-ready",
       name: "FabDazzle 试迁",
       source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
-      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      target_wiki_url: "https://example.feishu.cn/drive/folder/DriveFolderToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
       mode: "safe_incremental"
@@ -259,7 +257,7 @@ describe("配置优先迁移向导", () => {
       id: "project-scanning",
       name: "FabDazzle 全量盘点",
       source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
-      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      target_wiki_url: "https://example.feishu.cn/drive/folder/DriveFolderToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
       mode: "safe_incremental"
@@ -321,7 +319,7 @@ describe("配置优先迁移向导", () => {
       id: "project-persisted-step",
       name: "JF 文档迁移",
       source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
-      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      target_wiki_url: "https://example.feishu.cn/drive/folder/DriveFolderToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
       mode: "safe_incremental"
@@ -376,7 +374,7 @@ describe("配置优先迁移向导", () => {
       id: "project-live-upload",
       name: "JF 文档迁移",
       source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
-      target_wiki_url: "https://example.feishu.cn/wiki/WikiParentToken",
+      target_wiki_url: "https://example.feishu.cn/drive/folder/DriveFolderToken",
       create_wrapper: true,
       wrapper_name: "Team FabDazzle - 文档",
       mode: "safe_incremental",

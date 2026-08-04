@@ -20,9 +20,9 @@ const project: Project = {
   name: "FabDazzle 文档迁移",
   source_root: "D:\\TechStyle\\Team FabDazzle - 文档",
   target_wiki_url:
-    "https://pg6xd0yqgm.feishu.cn/wiki/XdhSwsU7PiDZSak2WoIc2Qb8nDc",
-  target_space_id: "728416037318",
-  target_parent_token: "XdhSwsU7PiDZSak2WoIc2Qb8nDc",
+    "https://pg6xd0yqgm.feishu.cn/drive/folder/DriveFolderTokenDemo",
+  target_space_id: "drive",
+  target_parent_token: "DriveFolderTokenDemo",
   wrapper_name: "Team FabDazzle - 文档",
   create_wrapper: true,
   mode: "safe_incremental",
@@ -38,7 +38,6 @@ let settings: AppSettings = {
     "offline_access",
     "drive:drive",
     "drive:file:upload",
-    "wiki:wiki",
     "drive:quota_detail:read_one",
     "contact:user.employee_id:readonly"
   ],
@@ -134,8 +133,8 @@ const tree: TreeNode[] = [
 const checks = [
   {
     code: "FEISHU_PERMISSION",
-    title: "知识库写入权限",
-    message: "授权用户可编辑目标知识库父节点",
+    title: "云盘写入权限",
+    message: "授权用户可访问目标云盘文件夹",
     severity: "ok" as const,
     blocking: false
   },
@@ -172,7 +171,7 @@ const checks = [
   },
   {
     code: "TREE_LIMITS",
-    title: "知识库层级",
+    title: "云盘目录层级",
     message: "最大 9 层，单层最多 346 个节点，均在限制内",
     severity: "ok" as const,
     blocking: false
@@ -205,7 +204,7 @@ const actions = [
     id: "a1",
     kind: "CREATE_FOLDER" as const,
     relative_path: "Apparel\\Forecast",
-    reason: "飞书知识库中不存在对应目录"
+    reason: "飞书云盘中不存在对应目录"
   },
   {
     id: "a2",
@@ -312,8 +311,8 @@ const audit: AuditEvent[] = [
     level: "SUCCESS",
     stage: "VERIFYING",
     relative_path: "Apparel\\Line Sheet - July.xlsx",
-    message: "知识库节点回读成功",
-    evidence: "wiki_token=wikcn•••14d · SHA-256 matched"
+    message: "云盘对象回读成功",
+    evidence: "object_token=file•••14d · SHA-256 matched"
   },
   {
     id: "e2",
@@ -321,7 +320,7 @@ const audit: AuditEvent[] = [
     level: "INFO",
     stage: "WIKI_MOVING",
     relative_path: "Apparel\\Line Sheet - July.xlsx",
-    message: "文件已从专用中转目录迁入知识库"
+    message: "文件已直接写入目标云盘目录"
   },
   {
     id: "e3",
@@ -407,7 +406,7 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       status: "ok",
-      version: "2.0.0-rc.7-demo",
+      version: "3.0.0-rc.1-demo",
       database: "ok"
     } as T;
   }
@@ -436,8 +435,8 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       kind: "oauth",
-      message: "OAuth 固定操作身份与六项权限已验证：Mack Luo",
-      details: { user_name: "Mack Luo", scope_count: 6 }
+      message: "用户授权固定操作身份与五项权限已验证：Mack Luo",
+      details: { user_name: "Mack Luo", scope_count: 5 }
     } as T;
   }
   if (path === "/api/v2/verify/source" && method === "POST") {
@@ -452,11 +451,10 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     return {
       ok: true,
       kind: "target",
-      message: "已读取知识库目标并确认页面编辑权限；容器编辑能力将在首个小批试迁时确认",
+      message: "已读取云盘目标文件夹；实际写入能力将在首个小批试迁时确认",
       details: {
-        space_id: project.target_space_id ?? "",
-        node_token: project.target_parent_token ?? "",
-        page_editable: true,
+        folder_token: project.target_parent_token ?? "",
+        child_count: 0,
         container_edit_requires_pilot: true
       }
     } as T;

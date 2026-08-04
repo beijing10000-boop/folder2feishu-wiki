@@ -15,7 +15,7 @@ $expanded = Join-Path $testRoot "expanded"
 $installed = Join-Path $testRoot "installed"
 $originalLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $testRoot "localappdata"
-$runtime = Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
+$runtime = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
 New-Item -ItemType Directory -Path $expanded -Force | Out-Null
 
 try {
@@ -52,7 +52,7 @@ try {
         throw "Python 版健康检查未通过。"
     }
     $index = Invoke-WebRequest -Uri "http://127.0.0.1:8000/" -TimeoutSec 5
-    if ($index.StatusCode -ne 200 -or $index.Content -notmatch "<title>Folder2Feishu") {
+    if ($index.StatusCode -ne 200 -or $index.Content -notmatch "<title>飞书云盘迁移") {
         throw "Python 版未正确提供前端首页。"
     }
     $pidFile = Join-Path $runtime "server.pid"

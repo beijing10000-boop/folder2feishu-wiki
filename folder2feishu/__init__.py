@@ -1,10 +1,10 @@
-"""Folder2Feishu Wiki v2.
+"""Folder2Feishu Drive v3.
 
 The package intentionally contains no SharePoint connector or content
 conversion code.  Its single responsibility is mirroring a hydrated local
-folder into a Feishu Wiki while retaining the original hierarchy.
+folder into Feishu Drive while retaining the original hierarchy.
 """
 
 from __future__ import annotations
 
-__version__ = "2.0.0rc7"
+__version__ = "3.0.0rc1"
