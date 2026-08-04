@@ -129,4 +129,4 @@ def test_missing_required_scope_is_rejected():
     authorization = oauth.begin_authorization("http://127.0.0.1:8000/callback")
     with pytest.raises(MissingScopesError) as caught:
         oauth.complete_authorization(code="code", state=authorization.state)
-    assert "wiki:wiki" in caught.value.missing_scopes
+    assert "drive:file:upload" in caught.value.missing_scopes

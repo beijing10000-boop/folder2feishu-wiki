@@ -339,7 +339,7 @@ def create_app(
             services.close()
 
     app = FastAPI(
-        title="Folder2Feishu Wiki",
+        title="Folder2Feishu Drive",
         version=__version__,
         docs_url=None,
         redoc_url=None,
@@ -499,7 +499,7 @@ def create_app(
     @app.post("/api/v2/projects")
     def create_project(value: ProjectCreate) -> dict[str, Any]:
         if not value.create_wrapper:
-            raise ValueError("知识库迁移必须创建同名根包装节点")
+            raise ValueError("云盘迁移必须创建同名根目录")
         project = services.create_project(
             name=value.name,
             source_root=value.source_root,
@@ -528,7 +528,7 @@ def create_app(
         updates = value.model_dump(exclude_none=True)
         create_wrapper = updates.pop("create_wrapper", None)
         if create_wrapper is False:
-            raise ValueError("知识库迁移必须保留同名根包装节点")
+            raise ValueError("云盘迁移必须保留同名根目录")
         if "source_root" in updates:
             assert isinstance(updates["source_root"], str)
             from .runtime import assert_runtime_outside_source
@@ -670,7 +670,7 @@ def create_app(
                         durable.id,
                         status=LedgerRunStatus.RUNNING,
                         current_stage="PREFLIGHT",
-                        last_message="正在检查权限、容量与目标知识库",
+                        last_message="正在检查权限、容量与目标云盘文件夹",
                         started_at=utc_now(),
                         heartbeat_at=utc_now(),
                     )

@@ -1,7 +1,7 @@
 {
-  "name": "folder2feishu-wiki-console",
+  "name": "folder2feishu-drive-console",
   "private": true,
-  "version": "2.0.0-rc.7",
+  "version": "3.0.0-rc.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -204,11 +204,15 @@ def test_preflight_is_blocked_when_inventory_exceeds_ccm_capacity(
     project = services.create_project(
         name="capacity-check",
         source_root=str(source),
-        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+        target_wiki_url="https://example.feishu.cn/drive/folder/ABCDEFGHIJKL",
     )
     services.scanner.scan(project.id)
 
     class FakeDrive:
+        @staticmethod
+        def list_folder(_: str) -> list[dict]:
+            return []
+
         @staticmethod
         def get_current_user_info() -> dict:
             return {"user_id": "current-user"}
@@ -277,11 +281,15 @@ def test_preflight_warns_but_remains_ready_when_quota_limit_is_not_returned(
     project = services.create_project(
         name="unknown-capacity-check",
         source_root=str(source),
-        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+        target_wiki_url="https://example.feishu.cn/drive/folder/ABCDEFGHIJKL",
     )
     services.scanner.scan(project.id)
 
     class FakeDrive:
+        @staticmethod
+        def list_folder(_: str) -> list[dict]:
+            return []
+
         @staticmethod
         def get_current_user_info() -> dict:
             return {"user_id": "current-user"}
@@ -353,7 +361,7 @@ def test_preflight_uses_zero_pending_bytes_for_unchanged_second_scan(
     project = services.create_project(
         name="incremental-capacity-check",
         source_root=str(source),
-        target_wiki_url="https://example.feishu.cn/wiki/ABCDEFGHIJKL",
+        target_wiki_url="https://example.feishu.cn/drive/folder/ABCDEFGHIJKL",
     )
     services.scanner.scan(project.id)
     item = next(
@@ -379,6 +387,10 @@ def test_preflight_uses_zero_pending_bytes_for_unchanged_second_scan(
     services.scanner.scan(project.id)
 
     class FakeDrive:
+        @staticmethod
+        def list_folder(_: str) -> list[dict]:
+            return []
+
         @staticmethod
         def get_current_user_info() -> dict:
             return {"user_id": "current-user"}
@@ -433,38 +445,3 @@ def test_preflight_uses_zero_pending_bytes_for_unchanged_second_scan(
     assert quota_check["blocking"] is False
     assert quota_check["status"] == "ok"
     assert "本地待迁移 0 字节" in quota_check["message"]
-
-
-def test_wiki_child_capacity_accounts_for_new_existing_and_ambiguous_wrapper() -> None:
-    other = [{"title": f"node-{index}", "obj_type": "docx"} for index in range(1_999)]
-
-    ok, message = ApplicationServices._wiki_child_capacity(
-        other,
-        wrapper_name="Pilot",
-    )
-    assert ok is True
-    assert "2000 / 2000" in message
-
-    ok, message = ApplicationServices._wiki_child_capacity(
-        [*other, {"title": "another", "obj_type": "docx"}],
-        wrapper_name="Pilot",
-    )
-    assert ok is False
-    assert "超过 2000" in message
-
-    ok, message = ApplicationServices._wiki_child_capacity(
-        [*other, {"title": "Pilot", "obj_type": "docx"}],
-        wrapper_name="Pilot",
-    )
-    assert ok is True
-    assert "同名 Docx 包装节点已存在" in message
-
-    ok, message = ApplicationServices._wiki_child_capacity(
-        [
-            {"title": "Pilot", "obj_type": "docx"},
-            {"title": "Pilot", "obj_type": "docx"},
-        ],
-        wrapper_name="Pilot",
-    )
-    assert ok is False
-    assert "人工消歧" in message

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_DPAPI_DESCRIPTION = "Folder2FeishuWiki credentials"
+_DPAPI_DESCRIPTION = "Folder2FeishuDrive credentials"
 _FALLBACK_WARNING = (
     "TEST-ONLY FALLBACK: values are plaintext and protected only by file permissions"
 )

@@ -24,7 +24,6 @@ DEFAULT_SCOPES = frozenset(
         "offline_access",
         "drive:drive",
         "drive:file:upload",
-        "wiki:wiki",
         "drive:quota_detail:read_one",
         "contact:user.employee_id:readonly",
     }

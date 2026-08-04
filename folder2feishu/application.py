@@ -31,7 +31,7 @@ from .feishu import (
     RateLimitSet,
     StoredUserTokenProvider,
     WikiService,
-    parse_wiki_token,
+    parse_drive_folder_token,
     save_app_secret,
     stored_app_secret_provider,
 )
@@ -43,12 +43,14 @@ from .settings import PublicSettings, SettingsStore
 from .verification import (
     VerificationResult,
     verify_app_credentials,
+    verify_drive_target,
     verify_oauth_identity,
     verify_source_root,
-    verify_wiki_target,
 )
 
-WIKI_MAX_CHILDREN = 2_000
+DRIVE_MAX_CHILDREN = 1_500
+DRIVE_MAX_DEPTH = 15
+DRIVE_MAX_TREE_NODES = 400_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,12 +184,11 @@ class ApplicationServices:
             raise FeishuError("请先保存并验证飞书应用，再完成 OAuth 授权")
         if self.token_provider().load() is None:
             raise FeishuError("尚未完成飞书 OAuth 授权，请先点击“开始飞书授权”")
-        drive, wiki = self.feishu_services()
-        return verify_wiki_target(
+        drive, _ = self.feishu_services()
+        return verify_drive_target(
             target_wiki_url,
             token_provider=self.token_provider(),
             drive=drive,
-            wiki=wiki,
         )
 
     def token_provider(self) -> StoredUserTokenProvider:
@@ -252,11 +253,11 @@ class ApplicationServices:
         drive, wiki = self.feishu_services()
         settings = self.settings_store.load()
         quota = DailyQuotaStore(self.paths.quota, budget=settings.daily_upload_budget)
-        return MigrationExecutor(self.store, drive, wiki, quota)
+        return MigrationExecutor(self.store, drive, wiki, quota, drive_direct=True)
 
     def reconciler(self) -> RemoteReconciler:
         drive, wiki = self.feishu_services()
-        return RemoteReconciler(self.store, drive, wiki)
+        return RemoteReconciler(self.store, drive, wiki, drive_direct=True)
 
     def create_project(
         self,
@@ -334,13 +335,9 @@ class ApplicationServices:
         )
         if auth["authorized"]:
             try:
-                drive, wiki = self.feishu_services()
-                token = parse_wiki_token(project.target_wiki_url)
-                node = wiki.get_node(token)
-                space_id = str(node.get("space_id") or "")
-                if not space_id:
-                    raise FeishuError("目标节点响应缺少 space_id")
-                target_parent_token = str(node.get("node_token") or token)
+                drive, _ = self.feishu_services()
+                target_parent_token = parse_drive_folder_token(project.target_wiki_url)
+                target_children = drive.list_folder(target_parent_token)
                 user_info = drive.get_current_user_info()
                 current_user_id = str(user_info.get("user_id") or "")
                 if not current_user_id:
@@ -353,17 +350,22 @@ class ApplicationServices:
                     )
                 inventory = self.inventory_summary(project.id)
                 pending_upload_bytes = self.planner.estimate_pending_upload_bytes(project.id)
-                target_depth = self._wiki_node_depth(wiki, node)
                 local_depth = int(inventory["max_depth"])
-                projected_depth = target_depth + 1 + local_depth
-                target_children = wiki.list_children(space_id, target_parent_token)
-                children_ok, children_message = self._wiki_child_capacity(
-                    target_children,
-                    wrapper_name=project.wrapper_name,
-                )
+                projected_depth = 1 + local_depth
+                max_siblings = int(inventory["max_siblings"])
+                total_nodes = int(inventory["files"]) + int(inventory["folders"])
+                wrapper_matches = [
+                    child
+                    for child in target_children
+                    if str(child.get("name") or "") == project.wrapper_name
+                    and str(child.get("type") or "") == "folder"
+                ]
+                if len(wrapper_matches) > 1:
+                    raise FeishuError("目标文件夹下存在多个同名根目录，请先人工消歧")
+                projected_children = len(target_children) + (0 if wrapper_matches else 1)
                 self.store.update_project(
                     project.id,
-                    target_space_id=space_id,
+                    target_space_id="drive",
                     target_parent_node_token=target_parent_token,
                     identity_key=current_user_id,
                 )
@@ -375,41 +377,45 @@ class ApplicationServices:
                 )
                 add(
                     "target_read",
-                    "目标知识库可访问",
-                    f"已读取知识空间 {space_id}",
+                    "目标云盘文件夹可访问",
+                    f"已读取目标文件夹，当前包含 {len(target_children)} 个对象",
                     ok=True,
                 )
                 add(
-                    "wiki_depth",
-                    "目标知识库深度可容纳",
+                    "drive_depth",
+                    "云盘目录深度可容纳",
                     (
-                        f"预计最深层级 {projected_depth} / 50"
-                        if projected_depth <= 50
-                        else f"目标父节点与本地目录合计将达到 {projected_depth} 层，超过 50"
+                        f"本次新增目录最深 {projected_depth} 层；云盘完整路径上限为 {DRIVE_MAX_DEPTH} 层"
+                        if projected_depth <= DRIVE_MAX_DEPTH
+                        else f"本地目录将新增 {projected_depth} 层，超过云盘 {DRIVE_MAX_DEPTH} 层上限"
                     ),
-                    ok=projected_depth <= 50,
+                    ok=projected_depth <= DRIVE_MAX_DEPTH,
                 )
                 add(
-                    "wiki_children",
-                    "目标父节点子节点容量",
-                    children_message,
-                    ok=children_ok,
+                    "drive_children",
+                    "云盘单层对象容量",
+                    (
+                        f"目标层预计 {projected_children} / {DRIVE_MAX_CHILDREN}；"
+                        f"本地最大单层 {max_siblings} / {DRIVE_MAX_CHILDREN}"
+                    ),
+                    ok=(
+                        projected_children <= DRIVE_MAX_CHILDREN
+                        and max_siblings <= DRIVE_MAX_CHILDREN
+                    ),
                 )
-                can_edit = drive.can_edit_wiki(token)
+                add(
+                    "drive_tree_nodes",
+                    "云盘树对象总量",
+                    f"本地计划写入 {total_nodes} / {DRIVE_MAX_TREE_NODES} 个对象",
+                    ok=total_nodes <= DRIVE_MAX_TREE_NODES,
+                )
                 add(
                     "target_edit",
-                    "目标父节点页面编辑权限",
-                    ("页面编辑权限检查已通过；容器编辑能力将在小批试迁首个节点创建时确认")
-                    if can_edit
-                    else "当前 OAuth 用户没有目标父节点页面编辑权限",
-                    ok=can_edit,
-                )
-                drive.get_root_folder_token()
-                add(
-                    "drive_root",
-                    "用户云盘中转可用",
-                    "已取得当前 OAuth 用户的云盘根目录",
+                    "目标文件夹写入权限",
+                    "读取验证已通过；首次小批迁移创建同名根目录时确认写入权限",
                     ok=True,
+                    blocking=False,
+                    warning=True,
                 )
                 try:
                     quota = drive.get_quota_detail(current_user_id)
@@ -707,54 +713,6 @@ class ApplicationServices:
             if normalized in {"false", "0", "no"}:
                 return False
         raise FeishuError(f"飞书云文档容量的 {field} 字段无效")
-
-    @staticmethod
-    def _wiki_node_depth(wiki: WikiService, node: dict[str, Any]) -> int:
-        depth = 1
-        current = node
-        seen: set[str] = set()
-        while True:
-            parent = str(current.get("parent_node_token") or "")
-            if not parent or parent == "0":
-                return depth
-            if parent in seen:
-                raise FeishuError("目标知识库父节点链存在循环，无法安全计算层级")
-            seen.add(parent)
-            depth += 1
-            if depth > 50:
-                return depth
-            current = wiki.get_node(parent)
-
-    @staticmethod
-    def _wiki_child_capacity(
-        children: list[dict[str, Any]],
-        *,
-        wrapper_name: str,
-    ) -> tuple[bool, str]:
-        wrapper_matches = [
-            child
-            for child in children
-            if str(child.get("title") or "") == wrapper_name
-            and str(child.get("obj_type") or "") == "docx"
-        ]
-        if len(wrapper_matches) > 1:
-            return (
-                False,
-                f"目标父节点下存在 {len(wrapper_matches)} 个同名 Docx 包装节点，必须先人工消歧",
-            )
-        additional = 0 if wrapper_matches else 1
-        projected = len(children) + additional
-        if projected > WIKI_MAX_CHILDREN:
-            return (
-                False,
-                f"目标父节点已有 {len(children)} 个子节点，"
-                f"新增根目录包装节点后将达到 {projected}，超过 {WIKI_MAX_CHILDREN}",
-            )
-        suffix = "（同名 Docx 包装节点已存在）" if wrapper_matches else ""
-        return (
-            True,
-            f"预计迁移开始时为 {projected} / {WIKI_MAX_CHILDREN} 个子节点{suffix}",
-        )
 
     @staticmethod
     def _max_siblings(items: list[Any]) -> int:

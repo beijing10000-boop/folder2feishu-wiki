@@ -15,6 +15,7 @@ from .feishu import (
     FeishuError,
     StoredUserTokenProvider,
     WikiService,
+    parse_drive_folder_token,
     parse_wiki_token,
 )
 from .runtime import RuntimePaths, assert_runtime_outside_source
@@ -113,7 +114,7 @@ def verify_oauth_identity(
     profile = drive.get_current_user_info()
     user_id = str(profile.get("user_id") or "").strip()
     if not user_id:
-        raise FeishuError("飞书未返回授权用户的 user_id，请确认六项权限已开通后重新授权")
+        raise FeishuError("飞书未返回授权用户的 user_id，请确认五项权限已开通后重新授权")
     user_name = str(
         profile.get("name")
         or profile.get("en_name")
@@ -122,7 +123,7 @@ def verify_oauth_identity(
     ).strip()
     return VerificationResult(
         kind="oauth",
-        message=f"OAuth 固定操作身份与六项权限已验证：{user_name}",
+        message=f"OAuth 固定操作身份与五项权限已验证：{user_name}",
         details={
             "user_name": user_name,
             "scope_count": len(DEFAULT_SCOPES),
@@ -192,6 +193,32 @@ def verify_wiki_target(
             "node_token": resolved_node_token,
             "title": title,
             "page_editable": True,
+            "container_edit_requires_pilot": True,
+        },
+    )
+
+
+def verify_drive_target(
+    target_drive_url: str,
+    *,
+    token_provider: StoredUserTokenProvider,
+    drive: DriveService,
+) -> VerificationResult:
+    """Read the selected Drive folder without creating or deleting objects."""
+
+    identity = verify_oauth_identity(token_provider, drive)
+    folder_token = parse_drive_folder_token(target_drive_url)
+    children = drive.list_folder(folder_token)
+    return VerificationResult(
+        kind="target",
+        message=(
+            f"已读取目标云盘文件夹，当前包含 {len(children)} 个对象；"
+            "写入能力将在首个小批试迁创建根目录时确认"
+        ),
+        details={
+            "folder_token": folder_token,
+            "child_count": len(children),
+            "user_id": identity.details.get("user_id", ""),
             "container_edit_requires_pilot": True,
         },
     )

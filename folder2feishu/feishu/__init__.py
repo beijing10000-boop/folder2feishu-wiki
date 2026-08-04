@@ -13,6 +13,7 @@ from .drive import (
     DriveService,
     StagedFile,
     deterministic_staging_name,
+    parse_drive_folder_token,
     staging_project_folder_name,
     staging_shard_folder_name,
 )
@@ -111,6 +112,7 @@ __all__ = [
     "WikiService",
     "WikiMoveTaskFailedError",
     "deterministic_staging_name",
+    "parse_drive_folder_token",
     "parse_wiki_reference",
     "parse_wiki_token",
     "pkce_challenge",

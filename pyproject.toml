@@ -3,13 +3,13 @@ requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "folder2feishu-wiki"
-version = "2.0.0rc7"
-description = "A recoverable Windows local-folder mirror for Feishu Wiki."
+name = "folder2feishu-drive"
+version = "3.0.0rc1"
+description = "A recoverable Windows local-folder mirror for Feishu Drive."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
-authors = [{name = "folder2feishu-wiki contributors"}]
+authors = [{name = "folder2feishu-drive contributors"}]
 dependencies = [
   "fastapi>=0.141.1,<0.142",
   "httpx>=0.28.1,<0.29",

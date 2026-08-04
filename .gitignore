@@ -21,6 +21,8 @@ build/
 release/
 .playwright-cli/
 ui-audit/
+.audit-runtime/
+.v3-preview/
 
 *.sqlite
 *.sqlite3

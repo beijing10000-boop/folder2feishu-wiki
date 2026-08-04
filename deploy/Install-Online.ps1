@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v2.0.0-rc.7",
+    [string]$Version = "v3.0.0-rc.1",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuWikiNext")
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive")
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,7 +25,7 @@ $expandedPath = Join-Path $temporaryRoot "expanded"
 
 New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
 try {
-    Write-Host "正在下载 Folder2Feishu Wiki $Version..." -ForegroundColor Cyan
+    Write-Host "正在下载 Folder2Feishu Drive $Version..." -ForegroundColor Cyan
     Invoke-WebRequest -UseBasicParsing -Uri "$releaseBase/$assetName" -OutFile $packagePath
     Invoke-WebRequest -UseBasicParsing -Uri "$releaseBase/SHA256SUMS.txt" -OutFile $checksumPath
 

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .client import FeishuAPIClient
 from .errors import (
@@ -32,6 +33,7 @@ CHUNK_SIZE = 4 * 1024 * 1024
 UPLOAD_SESSION_LIFETIME_SECONDS = 24 * 60 * 60
 UPLOAD_SESSION_EXPIRY_MARGIN_SECONDS = 10 * 60
 MAX_FILE_NAME_CHARACTERS = 250
+DRIVE_FOLDER_URL_SEGMENT = "folder"
 STAGING_ROOT_NAME = "Folder2Feishu-Staging"
 PERMISSION_RESOURCE_TYPES = frozenset(
     {
@@ -65,6 +67,31 @@ class StagedFile:
     file_token: str
     internal_name: str
     final_name: str
+
+
+def parse_drive_folder_token(value: str) -> str:
+    """Accept a Feishu Drive folder URL or a bare folder token."""
+
+    raw = value.strip()
+    if not raw:
+        raise ValueError("飞书云盘文件夹地址不能为空")
+    if "://" not in raw:
+        if any(character.isspace() for character in raw) or "/" in raw:
+            raise ValueError("飞书云盘文件夹 token 格式无效")
+        return raw
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").casefold()
+    if not (host.endswith(".feishu.cn") or host.endswith(".larksuite.com")):
+        raise ValueError("只支持飞书或 Lark 云盘文件夹地址")
+    parts = [part for part in parsed.path.split("/") if part]
+    try:
+        index = parts.index(DRIVE_FOLDER_URL_SEGMENT)
+        token = parts[index + 1]
+    except (ValueError, IndexError) as exc:
+        raise ValueError("地址中缺少 /drive/folder/<token>") from exc
+    if not token or any(character.isspace() for character in token):
+        raise ValueError("飞书云盘文件夹 token 格式无效")
+    return token
 
 
 def _validate_folder_token(token: str, field: str = "parent_node") -> str:
@@ -383,6 +410,71 @@ class DriveService:
             retry_mode=RetryMode.RATE_LIMIT,
         )
         return file_token
+
+    def move_file(
+        self,
+        file_token: str,
+        *,
+        object_type: str,
+        destination_folder_token: str,
+    ) -> str:
+        """Move a file or folder and return an optional asynchronous task ID."""
+
+        if not file_token.strip():
+            raise ValueError("file_token is required")
+        if object_type not in {"file", "folder"}:
+            raise ValueError("object_type must be file or folder")
+        body = self.api.request(
+            "POST",
+            f"/drive/v1/files/{file_token}/move",
+            rate_group=RateLimitSet.DRIVE_WRITE,
+            json={
+                "type": object_type,
+                "folder_token": _validate_folder_token(destination_folder_token),
+            },
+            retry_mode=RetryMode.RATE_LIMIT,
+        )
+        return str((body.get("data") or {}).get("task_id") or "")
+
+    def wait_task(self, task_id: str, *, timeout_seconds: float = 120.0) -> None:
+        if not task_id:
+            return
+        deadline = self._now() + timeout_seconds
+        while self._now() < deadline:
+            body = self.api.request(
+                "GET",
+                "/drive/v1/files/task_check",
+                params={"task_id": task_id},
+                retry_mode=RetryMode.SAFE,
+            )
+            status = str((body.get("data") or {}).get("status") or "").casefold()
+            if status in {"success", "succeeded", "done"}:
+                return
+            if status in {"failed", "failure", "error"}:
+                raise FeishuError(f"飞书云盘异步任务失败：{task_id}")
+            time.sleep(1.0)
+        raise FeishuError(f"飞书云盘异步任务等待超时：{task_id}")
+
+    def reconcile_child(
+        self,
+        parent_token: str,
+        *,
+        object_token: str,
+        name: str,
+        object_type: str,
+    ) -> dict[str, Any]:
+        """Verify the mapped child still has the expected parent, name and type."""
+
+        for item in self.list_folder(parent_token):
+            if str(item.get("token") or "") != object_token:
+                continue
+            differences: list[str] = []
+            if str(item.get("name") or "") != name:
+                differences.append("name")
+            if str(item.get("type") or "") != object_type:
+                differences.append("type")
+            return {"matched": not differences, "differences": differences, "item": item}
+        return {"matched": False, "differences": ["missing"], "item": None}
 
     def reconcile_staging_upload(self, parent_node: str, internal_name: str) -> str | None:
         item = self.find_by_name(

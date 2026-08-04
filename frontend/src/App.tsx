@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   ArrowRight,
   BadgeCheck,
-  Boxes,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -75,7 +74,6 @@ const DEFAULT_SCOPES = [
   "offline_access",
   "drive:drive",
   "drive:file:upload",
-  "wiki:wiki",
   "drive:quota_detail:read_one",
   "contact:user.employee_id:readonly"
 ];
@@ -84,13 +82,12 @@ const scopeLabels: Record<string, string> = {
   offline_access: "保持用户授权",
   "drive:drive": "访问云空间",
   "drive:file:upload": "上传文件",
-  "wiki:wiki": "管理知识库节点",
   "drive:quota_detail:read_one": "读取云空间容量",
   "contact:user.employee_id:readonly": "读取用户身份"
 };
 
 const issueCodeLabels: Record<string, string> = {
-  FEISHU_PERMISSION: "知识库权限",
+  FEISHU_PERMISSION: "云盘权限",
   DRIVE_CAPACITY: "云空间容量",
   ONEDRIVE_PLACEHOLDER: "本地文件状态",
   ZERO_BYTE: "空文件",
@@ -202,8 +199,8 @@ const statusLabel: Record<string, string> = {
   DISCOVERED: "已盘点",
   PLANNED: "已计划",
   UPLOADING: "上传中",
-  DRIVE_UPLOADED: "中转完成",
-  WIKI_MOVING: "迁入知识库",
+  DRIVE_UPLOADED: "云盘上传完成",
+  WIKI_MOVING: "云盘归档中",
   VERIFYING: "远端核验",
   DONE: "已完成",
   RETRYABLE: "可重试",
@@ -225,7 +222,7 @@ const stageLabel: Record<string, string> = {
   CANCELLED: "用户停止",
   FAILED: "执行失败",
   VERIFYING: "远端核验",
-  WIKI_MOVING: "迁入知识库",
+  WIKI_MOVING: "云盘归档中",
   RECONCILE: "远端对账",
   MIGRATION: "迁移执行"
 };
@@ -255,9 +252,9 @@ const translateTechnicalMessage = (message?: string): string => {
     .replace(/App Secret|Secret/gi, "应用密钥")
     .replace(/Windows File ID/gi, "本机文件标识")
     .replace(/OneDrive/gi, "本地同步文件")
-    .replace(/wiki_token/gi, "知识库令牌")
+    .replace(/wiki_token/gi, "云盘对象令牌")
     .replace(/OAuth/gi, "用户授权")
-    .replace(/Wiki/gi, "知识库")
+    .replace(/Wiki/gi, "云盘")
     .replace(/source item has no remote mapping/gi, "源项目尚无远端映射");
 };
 
@@ -326,9 +323,9 @@ type ValidationState = Record<
 const emptyValidation: ValidationState = {
   app: { status: "idle", message: "尚未验证应用配置" },
   oauth: { status: "idle", message: "尚未验证固定操作身份" },
-  throttle: { status: "idle", message: "尚未验证上传与知识库并发速率" },
+  throttle: { status: "idle", message: "尚未验证云盘上传速率" },
   source: { status: "idle", message: "尚未检查本地根目录配置" },
-  target: { status: "idle", message: "尚未检查知识库地址" },
+  target: { status: "idle", message: "尚未检查云盘目标文件夹" },
   policy: { status: "idle", message: "尚未检查增量策略" }
 };
 
@@ -595,7 +592,7 @@ function updateTreeNode(
 
 function App() {
   const [step, setStep] = useState<StepId>(readSavedStep);
-  const [version, setVersion] = useState("2.0");
+  const [version, setVersion] = useState("3.0");
   const [settings, setSettings] = useState<AppSettings>(emptySettings);
   const [secret, setSecret] = useState("");
   const [auth, setAuth] = useState<AuthStatus>({
@@ -722,18 +719,16 @@ function App() {
           oauth: {
             status: "idle",
             message: currentAuth.authorized
-              ? "已发现用户授权，请点击按钮回读身份与六项权限"
+              ? "已发现用户授权，请点击按钮回读身份与五项权限"
               : "请完成飞书用户授权"
           },
           throttle: {
             status:
               currentSettings.upload_qps > 0 &&
-              currentSettings.upload_qps <= 4 &&
-              currentSettings.wiki_calls_per_minute >= 1 &&
-              currentSettings.wiki_calls_per_minute <= 100
+              currentSettings.upload_qps <= 4
                 ? "passed"
                 : "idle",
-            message: "并发速率已加载；程序不设累计上限，飞书平台限额仍生效"
+            message: "云盘上传速率已加载；触发飞书限流时会自动退避"
           },
           source: {
             status: "idle",
@@ -744,8 +739,8 @@ function App() {
           target: {
             status: "idle",
             message: activeProject?.target_wiki_url
-              ? "知识库地址已保存，请点击按钮读取节点并检查页面编辑权限"
-              : "请填写飞书知识库地址"
+              ? "云盘目标文件夹已保存，请点击按钮检查访问与写入权限"
+              : "请填写飞书云盘文件夹地址"
           },
           policy: {
             status: activeProject ? "passed" : "idle",
@@ -950,10 +945,7 @@ function App() {
   const throttleConfigurationValid = (): boolean =>
     Number.isFinite(settings.upload_qps) &&
     settings.upload_qps > 0 &&
-    settings.upload_qps <= 4 &&
-    Number.isInteger(settings.wiki_calls_per_minute) &&
-    settings.wiki_calls_per_minute >= 1 &&
-    settings.wiki_calls_per_minute <= 100;
+    settings.upload_qps <= 4;
 
   const validateApp = async (): Promise<boolean> => {
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
@@ -990,12 +982,12 @@ function App() {
   };
 
   const validateThrottle = async (): Promise<boolean> => {
-    markValidation("throttle", "checking", "正在验证上传与知识库并发速率…");
+    markValidation("throttle", "checking", "正在验证云盘上传速率…");
     if (!throttleConfigurationValid()) {
       markValidation(
         "throttle",
         "failed",
-        "范围必须为：每秒上传请求数大于 0 且不超过 4，知识库调用为每分钟 1–100 次"
+        "每秒上传请求数必须大于 0 且不超过 4"
       );
       return false;
     }
@@ -1018,7 +1010,7 @@ function App() {
       markValidation(
         "throttle",
         "passed",
-        `每秒上传 ${saved.upload_qps} 次 · 知识库每分钟 ${saved.wiki_calls_per_minute} 次 · 飞书平台限额仍生效`
+        `每秒最多发起 ${saved.upload_qps} 次上传请求；触发飞书平台限流时自动冷却重试`
       );
       return true;
     } catch (error) {
@@ -1068,7 +1060,7 @@ function App() {
         ["https:"].includes(target.protocol) &&
         (target.hostname.endsWith(".feishu.cn") ||
           target.hostname.endsWith(".larksuite.com")) &&
-        /^\/wiki\/[A-Za-z0-9]+/.test(target.pathname)
+        /^\/drive\/folder\/[A-Za-z0-9]+/.test(target.pathname)
       );
     } catch {
       return false;
@@ -1077,7 +1069,7 @@ function App() {
 
   const persistProject = async (silent = false): Promise<Project | undefined> => {
     if (!draft.source_root.trim() || !draft.target_wiki_url.trim()) {
-      if (!silent) notify("请填写本地源目录和飞书知识库地址。", "warning");
+      if (!silent) notify("请填写本地源目录和飞书云盘目标文件夹地址。", "warning");
       return undefined;
     }
     const saved = project
@@ -1112,12 +1104,12 @@ function App() {
   };
 
   const validateTarget = async (): Promise<boolean> => {
-    markValidation("target", "checking", "正在检查飞书知识库地址配置…");
+    markValidation("target", "checking", "正在检查飞书云盘目标文件夹…");
     if (!targetConfigurationValid()) {
       markValidation(
         "target",
         "failed",
-        "必须填写有效的飞书知识库父节点地址"
+        "必须填写有效的飞书云盘文件夹地址"
       );
       return false;
     }
@@ -1130,7 +1122,7 @@ function App() {
       markValidation(
         "target",
         "failed",
-        error instanceof Error ? translateTechnicalMessage(error.message) : "本机服务未接受知识库配置"
+        error instanceof Error ? translateTechnicalMessage(error.message) : "本机服务未接受云盘目标文件夹配置"
       );
       return false;
     }
@@ -1139,7 +1131,7 @@ function App() {
   const validatePolicy = async (): Promise<boolean> => {
     markValidation("policy", "checking", "正在检查根节点与安全增量策略…");
     if (!draft.create_wrapper) {
-      markValidation("policy", "failed", "知识库迁移必须创建同名根包装节点");
+      markValidation("policy", "failed", "云盘迁移必须创建同名根文件夹");
       return false;
     }
     if ((draft.wrapper_name?.length ?? 0) > 250) {
@@ -1493,14 +1485,14 @@ function App() {
             <i />
           </span>
           <div>
-            <span>本地目录到飞书知识库</span>
-            <strong>文件迁移控制台</strong>
+            <span>本地目录到飞书云盘</span>
+            <strong>飞书云盘迁移</strong>
           </div>
         </div>
         <div className="topbar__route" aria-label="迁移方向">
           <span><HardDrive size={15} /> 本机目录</span>
           <span className="route-line"><i /><ArrowRight size={15} /></span>
-          <span className="route-destination"><Boxes size={15} /> 飞书知识库</span>
+          <span className="route-destination"><Cloud size={15} /> 飞书云盘</span>
         </div>
         <div className="topbar__status">
           <button
@@ -1673,9 +1665,9 @@ function App() {
                   [
                     ["app", "01", "飞书应用", "应用编号、应用密钥与回调地址"],
                     ["oauth", "02", "用户授权", "固定用户与完整权限范围"],
-                    ["throttle", "03", "并发速率", "上传与知识库操作频率"],
+                    ["throttle", "03", "上传速率", "云盘写入与限流保护"],
                     ["source", "04", "本地来源", "本机绝对路径"],
-                    ["target", "05", "知识库落点", "知识库父节点地址"],
+                    ["target", "05", "云盘目标", "目标文件夹地址"],
                     ["policy", "06", "安全策略", "根节点与安全增量"]
                   ] as Array<[ValidationKey, string, string, string]>
                 ).map(([key, no, label, detail]) => (
@@ -1696,7 +1688,7 @@ function App() {
                   <strong>验证边界</strong>
                   <span>
                     本页每个按钮都调用独立后端验证：应用凭据、用户授权身份、本地根层可读性和
-                    知识库页面编辑权限均会真实检查。不会为验证而写入飞书；容器编辑能力由首个小批试迁确认，
+                    云盘文件夹访问权限均会真实检查。不会为验证而写入飞书；实际写入能力由首个小批试迁确认，
                     云端占位状态与全目录完整性由“盘点”检查。
                   </span>
                 </div>
@@ -1810,7 +1802,7 @@ function App() {
                     <h3>{auth.authorized ? auth.user_name ?? "飞书用户已授权" : "等待完成飞书授权"}</h3>
                     <p>
                       {auth.authorized
-                        ? "此身份将贯穿上传、中转、迁入知识库和远端回读。"
+                        ? "此身份将贯穿上传、目录创建、增量更新和远端回读。"
                         : "先验证应用配置，再在飞书页面确认所需权限。"}
                     </p>
                     <div className="identity-card__meta">
@@ -1841,13 +1833,13 @@ function App() {
               <Panel>
                 <PanelHeading
                   eyebrow="速率控制"
-                  title="上传与知识库并发速率"
-                  copy="程序不设置自定义累计上限；飞书平台的每秒、每分钟和每日限额仍会生效，触发后自动退避。"
+                  title="云盘上传速率"
+                  copy="使用受控并发保护本机与飞书服务；触发平台限流后自动退避并从断点继续。"
                   icon={Gauge}
                   tools={<ValidationBadge {...validation.throttle} />}
                 />
                 <div className="operation-config">
-                  <div className="field-grid">
+                  <div className="field-grid field-grid--single">
                     <Field label="每秒文件上传请求数" required hint="范围：大于 0 且不超过 4">
                       <input
                         type="number"
@@ -1861,23 +1853,6 @@ function App() {
                             upload_qps: Number(event.target.value || 0)
                           });
                           markValidation("throttle", "idle", "每秒上传请求数已修改，请重新验证");
-                          setPlan(undefined);
-                        }}
-                      />
-                    </Field>
-                    <Field label="知识库调用次数 / 分钟" required hint="范围：1–100">
-                      <input
-                        type="number"
-                        min="1"
-                        max="100"
-                        step="1"
-                        value={settings.wiki_calls_per_minute}
-                        onChange={(event) => {
-                          setSettings({
-                            ...settings,
-                            wiki_calls_per_minute: Number(event.target.value || 0)
-                          });
-                          markValidation("throttle", "idle", "知识库调用频率已修改，请重新验证");
                           setPlan(undefined);
                         }}
                       />
@@ -1906,8 +1881,8 @@ function App() {
               <Panel className="route-builder">
                 <PanelHeading
                   eyebrow="单向迁移路径"
-                  title="唯一来源、唯一落点与安全增量"
-                  copy="源目录始终只读；飞书云盘只承担临时中转，最终节点进入知识库。"
+                  title="唯一来源、唯一云盘落点与安全增量"
+                  copy="源目录始终只读；文件和目录按原结构直接写入目标云盘文件夹。"
                   icon={Route}
                 />
                 <form onSubmit={validateAll}>
@@ -1927,7 +1902,7 @@ function App() {
                             setPreflight(undefined);
                             setPlan(undefined);
                           }}
-                          placeholder="D:\迁移资料\知识库文件"
+                          placeholder="D:\迁移资料\公司文档"
                           required
                         />
                       </Field>
@@ -1953,21 +1928,21 @@ function App() {
                   </div>
                   <div className="route-node route-node--target">
                     <div className="route-node__type">
-                      <Boxes size={21} />
-                      <span>04 · 知识库落点</span>
+                      <Cloud size={21} />
+                      <span>04 · 云盘目标</span>
                     </div>
                     <div className="route-node__body">
-                      <Field label="飞书知识库父节点地址" required hint="支持知识库地址；必须拥有此节点的容器编辑权限。">
+                      <Field label="飞书云盘文件夹地址" required hint="请粘贴 /drive/folder/ 地址，并确认当前授权用户可以编辑该文件夹。">
                         <input
                           type="url"
                           value={draft.target_wiki_url}
                           onChange={(event) => {
                             setDraft({ ...draft, target_wiki_url: event.target.value });
-                            markValidation("target", "idle", "知识库地址已修改，请重新验证");
+                            markValidation("target", "idle", "云盘目标文件夹已修改，请重新验证");
                             setPreflight(undefined);
                             setPlan(undefined);
                           }}
-                          placeholder="请输入飞书知识库父节点地址"
+                          placeholder="https://example.feishu.cn/drive/folder/xxxxxxxx"
                           required
                         />
                       </Field>
@@ -1980,7 +1955,7 @@ function App() {
                           busy={validation.target.status === "checking"}
                           onClick={validateTarget}
                         >
-                          验证知识库地址
+                          验证云盘文件夹
                         </Button>
                       </div>
                     </div>
@@ -1993,7 +1968,7 @@ function App() {
                         onChange={(event) => setDraft({ ...draft, name: event.target.value })}
                       />
                     </Field>
-                    <Field label="知识库根节点名称" hint="默认使用本地根目录名称。">
+                    <Field label="云盘根文件夹名称" hint="默认使用本地根目录名称。">
                       <input
                         value={draft.wrapper_name ?? ""}
                         onChange={(event) => {
@@ -2014,7 +1989,7 @@ function App() {
                       setPlan(undefined);
                     }}
                     label="创建同名根节点"
-                    description="必需。完整保留本地根目录，并避免不同来源混入同一知识库层级。"
+                    description="必需。完整保留本地根目录，并避免不同来源混入同一云盘层级。"
                   />
                   <div className="policy-verify">
                     <div>
@@ -2060,11 +2035,9 @@ function App() {
                     <div className="flow-legend__line">
                       <span><HardDrive size={17} /> 本地文件</span>
                       <ArrowRight size={14} />
-                      <span><Cloud size={17} /> 专用中转</span>
-                      <ArrowRight size={14} />
-                      <span><Boxes size={17} /> 知识库</span>
+                      <span><Cloud size={17} /> 目标云盘文件夹</span>
                     </div>
-                    <p>成功迁入后，中转目录不再保留该文件，各类文件均保持原格式。</p>
+                    <p>文件直接上传到目标目录，无需在线文档转换；所有文件保持原名称与格式。</p>
                   </div>
                 </Panel>
                 <Panel tone="green">
@@ -2076,7 +2049,7 @@ function App() {
                     </div>
                     <ul>
                       <li>内容未变：不重复上传</li>
-                      <li>仅移动改名：复用原知识库节点</li>
+                      <li>仅移动改名：复用原云盘对象</li>
                       <li>内容变化：旧版进入历史区</li>
                       <li>本地删除：只报告，不删飞书</li>
                     </ul>
@@ -2183,7 +2156,7 @@ function App() {
                     <PanelHeading
                       eyebrow="本地目录树"
                       title="原目录盘点结果"
-                      copy="文件夹是一等对象；空目录也会在知识库中创建对应节点。"
+                      copy="文件夹是一等对象；空目录也会在飞书云盘中创建对应文件夹。"
                       icon={FolderTree}
                     />
                     <div className="tree-view inventory-tree">
@@ -2245,7 +2218,7 @@ function App() {
                           <span className="eyebrow">预检交接</span>
                           <h3>本页确认本地事实</h3>
                           <p>
-                            盘点完整后，下一步才会用固定授权身份真实检查知识库父节点、
+                            盘点完整后，下一步才会用固定授权身份真实检查云盘目标文件夹、
                             容器编辑权限、云盘根目录与租户容量。
                           </p>
                         </div>
@@ -2464,7 +2437,7 @@ function App() {
                           onClick={startRun}
                           disabled={Boolean(blocking.length)}
                         >
-                          开始迁移到知识库
+                          开始迁移到云盘
                         </Button>
                       )}
                       {blocking.length ? <small className="launch-blocked">仍有预检阻断项，无法启动。</small> : null}
@@ -2589,7 +2562,7 @@ function App() {
                     </span>
                   </div>
                   <div className="quota-panel__copy">
-                    <span>知识库节流 <b>{run.quota.wiki_calls_minute} / {run.quota.wiki_calls_limit}</b> 次/分钟</span>
+                    <span>写入保护 <b>{run.worker_count || 1}</b> 个并行工作线程</span>
                     <span>飞书平台限额仍生效；限流自动冷却重试</span>
                   </div>
                 </Panel>
@@ -2665,7 +2638,7 @@ function App() {
                   <PanelHeading
                     eyebrow="文件执行队列"
                     title="文件执行队列"
-                    copy="上传令牌、分片进度和知识库任务号会在每一步立即写入本地台账。"
+                    copy="上传令牌、分片进度和云盘对象令牌会在每一步立即写入本地台账。"
                     icon={UploadCloud}
                     tools={
                       <div className="segmented">

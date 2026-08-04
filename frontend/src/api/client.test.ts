@@ -20,7 +20,7 @@ describe("API 安全会话", () => {
             JSON.stringify({
               app_id: "cli_test",
               redirect_uri: "http://127.0.0.1:8000/oauth/callback",
-              scopes: ["wiki:wiki"],
+              scopes: ["drive:drive"],
               secret_configured: true
             }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -34,7 +34,7 @@ describe("API 安全会话", () => {
       app_id: "cli_test",
       app_secret: "temporary-input-only",
       redirect_uri: "http://127.0.0.1:8000/oauth/callback",
-      scopes: ["wiki:wiki"]
+      scopes: ["drive:drive"]
     });
 
     expect(settings.app_secret_configured).toBe(true);
@@ -73,7 +73,7 @@ describe("API 安全会话", () => {
     await api.verifyApp();
     await api.verifyOauth();
     await api.verifySource("D:\\OneDrive");
-    await api.verifyTarget("https://example.feishu.cn/wiki/WikiParentToken99");
+    await api.verifyTarget("https://example.feishu.cn/drive/folder/DriveFolderToken99");
 
     const verificationCalls = calls.filter((call) => call.url.includes("/verify/"));
     expect(verificationCalls.map((call) => call.url)).toEqual([

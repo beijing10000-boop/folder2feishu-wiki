@@ -13,6 +13,7 @@ from folder2feishu.feishu import (
     RateLimitSet,
     UploadSession,
     deterministic_staging_name,
+    parse_drive_folder_token,
 )
 
 
@@ -133,6 +134,36 @@ def test_can_edit_wiki_checks_container_edit_permission():
         )
 
     assert _service(handler).can_edit_wiki("wiki_parent") is True
+
+
+def test_drive_folder_url_and_bare_token_are_parsed() -> None:
+    assert parse_drive_folder_token("DriveFolderToken99") == "DriveFolderToken99"
+    assert (
+        parse_drive_folder_token(
+            "https://example.feishu.cn/drive/folder/DriveFolderToken99?from=space"
+        )
+        == "DriveFolderToken99"
+    )
+    with pytest.raises(ValueError, match="/drive/folder"):
+        parse_drive_folder_token("https://example.feishu.cn/wiki/WikiToken99")
+
+
+def test_move_file_uses_drive_destination_folder_and_returns_task_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/drive/v1/files/file-1/move")
+        assert json.loads(request.content) == {
+            "type": "file",
+            "folder_token": "destination-folder",
+        }
+        return httpx.Response(200, json={"code": 0, "data": {"task_id": "task-1"}})
+
+    task_id = _service(handler).move_file(
+        "file-1",
+        object_type="file",
+        destination_folder_token="destination-folder",
+    )
+    assert task_id == "task-1"
 
 
 def test_root_and_staging_folders_return_explicit_tokens():

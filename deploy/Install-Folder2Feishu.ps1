@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuWikiNext"),
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive"),
     [string]$PythonCommand = "",
     [switch]$NoShortcut,
     [switch]$SkipLaunch
@@ -16,7 +16,7 @@ else {
     (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
-$runtimeDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuWikiNext"
+$runtimeDir = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
 $sameLocation = $sourceRoot.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase)
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "folder2feishu\__main__.py"))) {
@@ -70,7 +70,7 @@ function Remove-LegacySchedules {
         foreach ($property in $legacy.PSObject.Properties) {
             $projectId = [string]$property.Name
             if ($projectId -match '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') {
-                & schtasks.exe /Delete /F /TN "Folder2FeishuWiki-$projectId" 2>$null | Out-Null
+                & schtasks.exe /Delete /F /TN "Folder2FeishuDrive-$projectId" 2>$null | Out-Null
             }
         }
         Remove-Item -LiteralPath $scheduleFile -Force
@@ -136,13 +136,13 @@ Remove-LegacySchedules
 
 if (-not $NoShortcut) {
     $desktop = [Environment]::GetFolderPath("Desktop")
-    $shortcutPath = Join-Path $desktop "Folder2Feishu Wiki Next.lnk"
+    $shortcutPath = Join-Path $desktop "Folder2Feishu Drive.lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = (Get-Command "powershell.exe").Source
     $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $InstallDir "Start-Folder2Feishu.ps1")
     $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.Description = "Start the Folder2Feishu Wiki migration console"
+    $shortcut.Description = "启动本地目录到飞书云盘迁移控制台"
     $shortcut.Save()
 }
 
