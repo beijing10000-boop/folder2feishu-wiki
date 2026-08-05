@@ -1473,11 +1473,7 @@ function App() {
     return (
       <main className="boot-screen" aria-busy="true">
         <div className="boot-screen__scope">
-          <span className="brand-mark" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
+          <span className="brand-mark" aria-hidden="true"><UploadCloud size={22} /></span>
           <LoaderCircle className="spin" size={28} aria-hidden="true" />
           <h1>正在建立本机安全会话</h1>
           <p>读取迁移台账、授权状态与上次断点…</p>
@@ -1505,11 +1501,7 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
+          <span className="brand-mark" aria-hidden="true"><UploadCloud size={22} /></span>
           <div>
             <span>本地目录到飞书云盘</span>
             <strong>飞书云盘迁移</strong>
@@ -1517,7 +1509,7 @@ function App() {
         </div>
         <div className="topbar__route" aria-label="迁移方向">
           <span><HardDrive size={15} /> 本机目录</span>
-          <span className="route-line"><i /><ArrowRight size={15} /></span>
+          <span className="route-line"><ArrowRight size={15} /></span>
           <span className="route-destination"><Cloud size={15} /> 飞书云盘</span>
         </div>
         <div className="topbar__status">
@@ -2563,9 +2555,8 @@ function App() {
                   <Button icon={RotateCcw} busy={busy === "run-retry"} onClick={() => controlRun("retry")}>重试失败项</Button>
                   <Button variant="danger" icon={Square} busy={busy === "run-stop"} onClick={() => controlRun("stop")}>停止</Button>
                 </div>
-              </div>
-              <div className="run-metrics">
-                <Panel className="progress-panel">
+                <div className="run-marquee__metrics">
+                  <div className="progress-panel">
                   <div className="progress-panel__top">
                     <div>
                       <span className="eyebrow">迁移总进度</span>
@@ -2581,21 +2572,22 @@ function App() {
                     <span>数据进度 {byteProgress}% · {formatBytes(run.bytes_completed)} / {formatBytes(run.bytes_total)}</span>
                     <span>预计剩余 <b>{formatEta(run.eta_seconds)}</b></span>
                   </div>
-                </Panel>
-                <Panel className="quota-panel">
-                  <span className="eyebrow">上传接口调用</span>
-                  <div className="quota-unlimited">
-                    <Infinity size={28} aria-hidden="true" />
-                    <span>
-                      <strong>{run.quota.upload_calls_used.toLocaleString()}</strong>
-                      <small>已调用</small>
-                    </span>
                   </div>
-                  <div className="quota-panel__copy">
-                    <span>写入保护 <b>{run.worker_count || 1}</b> 个并行工作线程</span>
-                    <span>飞书平台限额仍生效；限流自动冷却重试</span>
+                  <div className="quota-panel">
+                    <span className="eyebrow">上传接口调用</span>
+                    <div className="quota-unlimited">
+                      <Infinity size={28} aria-hidden="true" />
+                      <span>
+                        <strong>{run.quota.upload_calls_used.toLocaleString()}</strong>
+                        <small>已调用</small>
+                      </span>
+                    </div>
+                    <div className="quota-panel__copy">
+                      <span>写入保护 <b>{run.worker_count || 1}</b> 个并行工作线程</span>
+                      <span>飞书平台限额仍生效；限流自动冷却重试</span>
+                    </div>
                   </div>
-                </Panel>
+                </div>
               </div>
               <div className="run-live-grid">
                 <Panel className="upload-progress-panel">

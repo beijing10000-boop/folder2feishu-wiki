@@ -404,14 +404,29 @@ def create_app(
         finally:
             duration = time.perf_counter() - started
             METRICS.record_api(request.url.path, duration, status_code)
-            log_method = LOGGER.warning if duration >= 1.0 else LOGGER.info
-            log_method(
-                "HTTP request completed",
-                extra={
-                    "path": request.url.path,
-                    "duration_ms": round(duration * 1000, 2),
-                },
+            path = request.url.path
+            quiet_status_poll = (
+                request.method == "GET"
+                and status_code < 400
+                and duration < 1.0
+                and (
+                    path == "/api/v2/runtime/logs"
+                    or path.startswith("/api/v2/runs/")
+                )
             )
+            # The run page polls these two local endpoints every few seconds. Keep
+            # metrics for diagnostics, but do not flood the operator log with
+            # successful, sub-second localhost refreshes. Errors and slow polls
+            # remain visible, as do all migration and Feishu request logs.
+            if not quiet_status_poll:
+                log_method = LOGGER.warning if duration >= 1.0 else LOGGER.info
+                log_method(
+                    "HTTP request completed",
+                    extra={
+                        "path": path,
+                        "duration_ms": round(duration * 1000, 2),
+                    },
+                )
             request_id_var.reset(token)
 
     @app.exception_handler(ApiFailure)
