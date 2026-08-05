@@ -368,6 +368,8 @@ const getRun = (): RunSummary => {
     bytes_total: scan.summary.bytes,
     bytes_completed: Math.round(scan.summary.bytes * (baseCompleted / 39_924)),
     eta_seconds: runState === "RUNNING" ? 98_840 : undefined,
+    worker_count: 6,
+    in_flight: runState === "RUNNING" ? 6 : 0,
     active_uploads: runState === "RUNNING" ? [
       {
         action_id: "r2",

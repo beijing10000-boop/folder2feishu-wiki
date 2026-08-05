@@ -18,6 +18,7 @@ from folder2feishu.core import (
     RunType,
 )
 from folder2feishu.executor import (
+    DEFAULT_MIGRATION_WORKERS,
     MigrationBlocked,
     MigrationExecutor,
     RemoteReconciler,
@@ -31,6 +32,10 @@ from folder2feishu.feishu import (
     deterministic_staging_name,
 )
 from folder2feishu.quota import DailyQuotaStore
+
+
+def test_default_migration_worker_count_balances_latency_and_rate_limit() -> None:
+    assert DEFAULT_MIGRATION_WORKERS == 6
 
 
 class FakeDrive:

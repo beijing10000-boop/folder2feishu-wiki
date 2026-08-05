@@ -1,34 +1,28 @@
-# Design QA — v1.0.0-rc.6
+# Design QA — UI v4 refactor
 
 ## Comparison inputs
 
 - Selected visual target: `docs/ui-audit/selected-visual-target.png`
-- Implemented inventory page: `docs/ui-audit/after-inventory.jpg`
-- Same-input comparison: `docs/ui-audit/target-vs-implementation.jpg`
-- Baseline before redesign: `docs/ui-audit/before-dark-inventory.png`
+- Historical dark baseline: `docs/ui-audit/before-dark-inventory.png`
+- Current implementation screenshot: pending
 
-## Final design language
+## Static and automated verification
 
-- Light enterprise console with neutral gray page surfaces, white panels, blue primary actions and restrained teal section labels.
-- One compact top application bar with a horizontal five-step migration flow.
-- 8 px spacing rhythm, 6–10 px control radius, 1 px neutral borders and no decorative grid, glow or heavy shadow.
-- Chinese system sans-serif for body text and tabular numerals for counters and progress data.
-- Blue for active/primary, green for verified/success, amber for non-blocking manual attention and red for blocking/failure.
+- One light enterprise-console token set is loaded from `frontend/src/styles.css`.
+- The obsolete `frontend/src/v3.css` override layer has been removed.
+- Configuration, inventory, preflight, difference plan, run controls, queues and logs share the same panel, spacing, status and button system.
+- Desktop breakpoints are defined for 1380 px, 1180 px, 820 px and 560 px.
+- TypeScript checking, 13 frontend tests, production build and backend test suite pass.
+- Run progress and upload-call metrics now share the top task-status container, preserving the existing information and controls while reducing vertical fragmentation.
+- Runtime status polling remains active for live feedback; successful fast localhost polls are excluded from operator logs without removing metrics or error evidence.
 
-## Audit and iteration history
+## Browser visual verification
 
-1. **P2 — wide-screen density and alignment:** the first implementation retained a separate tall navigation row and capped content too narrowly, leaving excessive unused space. The navigation was folded into the 64 px application bar and the workspace was centered with a 1920 px maximum width.
-2. **P2 — hierarchy and consistency:** the original dark interface used decorative grids, many nested outlines, undersized labels and competing accent colors. Shared panel, metric, form, table, tree, status and button treatments now use one token set.
-3. **P2 — high-volume readability:** issue lists and execution queues lacked clear semantic grouping. They now use compact rows, fixed state colors, aligned counters, filter controls and bounded scroll regions.
-4. **P3 — configuration section header:** one overview header retained a dark background after the theme switch. It was corrected to the shared light information surface.
-5. **P3 — obsolete quota language:** daily budget and estimated-day language remained in several labels. The final pass removes the application-side daily call cap and presents only QPS/Wiki rate control plus 429 backoff.
+- Intended viewports: 1920×1080, 1366×768 and 1024×768.
+- Required checks: clipping, horizontal overflow, fixed navigation overlap, long-path truncation, form alignment, table density, queue/log scrolling and browser console errors.
+- Current blocker: the in-app browser connection failed before a tab could be created (`failed to write kernel assets: 系统找不到指定的路径`). The local demo server itself responds with HTTP 200.
+- Historical screenshots are not accepted as proof for the current stylesheet.
 
-## Final verification
+## Final result
 
-- Core pages checked: configuration, inventory, preflight, difference plan and run/reconciliation.
-- Primary interactions checked: configuration validation, navigation through all five steps and failed/conflict queue filtering.
-- Responsive desktop checks: 1920×1080, 1366×768 and 1024×768.
-- Horizontal overflow: none at all tested desktop widths.
-- Browser console: no application errors; only Vite development and React DevTools informational messages.
-- Final severity result: no open P0, P1 or P2 visual issues.
-- Remaining P3: the 1024 px desktop layout intentionally becomes vertically longer; this is accepted because mobile/tablet design is outside the project scope and all controls remain readable and reachable.
+`blocked` — automated regression is green, but current-version browser screenshots and same-viewport comparison are still required before visual QA can be marked passed.
