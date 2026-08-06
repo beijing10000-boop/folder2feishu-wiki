@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,81 @@ def test_executor_parallelizes_independent_file_uploads(tmp_path: Path) -> None:
     assert result.failed == result.conflicts == 0
     assert drive.uploads == 2
     assert drive.max_active >= 2
+
+
+def test_executor_hashes_deferred_file_once_and_persists_digest(tmp_path: Path) -> None:
+    source = tmp_path / "fast-source"
+    source.mkdir()
+    payload = b"deferred-until-upload"
+    (source / "report.xlsx").write_bytes(payload)
+    store = CoreStore(tmp_path / "fast-ledger.sqlite3")
+    project = store.create_project(
+        name="fast",
+        source_root=source,
+        target_wiki_url="https://example.feishu.cn/wiki/target-parent",
+        target_space_id="space-1",
+        target_parent_node_token="target-parent",
+        identity_key="fixed-user",
+    )
+    scan = InventoryScanner(store, defer_new_hashes=True).scan(project.id)
+    assert scan.complete
+    item = next(item for item in store.list_inventory(project.id) if item.rel_path)
+    assert item.sha256 is None
+    MigrationPlanner(store).build(project.id)
+    _confirm(store, project.id)
+    drive = FakeDrive()
+
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        FakeWiki(drive),  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "fast-quota.json"),
+    ).execute(project.id)
+
+    assert result.failed == result.conflicts == 0
+    expected = hashlib.sha256(payload).hexdigest()
+    persisted = next(item for item in store.list_inventory(project.id) if item.rel_path)
+    assert persisted.sha256 == expected
+    mapping = next(
+        mapping
+        for mapping in store.list_remote_mappings(project.id)
+        if mapping.last_source_rel_path == "report.xlsx"
+    )
+    assert mapping.source_sha256 == expected
+    store.close()
+
+
+def test_executor_blocks_file_changed_after_fast_inventory(tmp_path: Path) -> None:
+    source = tmp_path / "changed-source"
+    source.mkdir()
+    local_file = source / "report.xlsx"
+    local_file.write_bytes(b"before")
+    store = CoreStore(tmp_path / "changed-ledger.sqlite3")
+    project = store.create_project(
+        name="changed",
+        source_root=source,
+        target_wiki_url="https://example.feishu.cn/wiki/target-parent",
+        target_space_id="space-1",
+        target_parent_node_token="target-parent",
+        identity_key="fixed-user",
+    )
+    assert InventoryScanner(store, defer_new_hashes=True).scan(project.id).complete
+    MigrationPlanner(store).build(project.id)
+    _confirm(store, project.id)
+    local_file.write_bytes(b"changed-after-inventory")
+    drive = FakeDrive()
+
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        FakeWiki(drive),  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "changed-quota.json"),
+    ).execute(project.id)
+
+    assert result.failed + result.conflicts == 1
+    assert drive.uploads == 0
+    assert next(item for item in store.list_inventory(project.id) if item.rel_path).sha256 is None
+    store.close()
 
 
 def test_executor_sliding_window_replenishes_while_large_upload_is_running(

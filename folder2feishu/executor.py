@@ -33,7 +33,7 @@ from .core import (
     RunType,
 )
 from .core.models import utc_now
-from .core.scanner import sha256_file
+from .core.scanner import file_identity, sha256_file
 from .feishu import (
     DriveService,
     FeishuAmbiguousWriteError,
@@ -1667,9 +1667,32 @@ class MigrationExecutor:
             raise MigrationBlocked(f"源文件已不可读：{item.rel_path}") from exc
         if not source.is_file() or stat_result.st_size != item.size:
             raise MigrationBlocked(f"源文件在计划后发生变化：{item.rel_path}")
-        digest = sha256_file(source)
-        if digest != item.sha256:
+        if item.mtime_ns is not None and int(stat_result.st_mtime_ns) != int(item.mtime_ns):
             raise MigrationBlocked(f"源文件在计划后发生变化：{item.rel_path}")
+        current_identity = file_identity(stat_result, source)
+        if item.file_identity and current_identity and current_identity != item.file_identity:
+            raise MigrationBlocked(f"源文件在计划后发生变化：{item.rel_path}")
+
+        # Fast inventories intentionally defer the first digest. Compute it
+        # once, immediately before upload, then persist it so retries and later
+        # incremental scans do not read the whole file again. Existing hashes
+        # are protected by the immutable size/mtime/file-ID snapshot above.
+        if item.sha256:
+            return source
+        digest = sha256_file(source)
+        try:
+            final_stat = source.stat()
+        except OSError as exc:
+            raise MigrationBlocked(f"源文件已不可读：{item.rel_path}") from exc
+        final_identity = file_identity(final_stat, source)
+        if (
+            final_stat.st_size != stat_result.st_size
+            or int(final_stat.st_mtime_ns) != int(stat_result.st_mtime_ns)
+            or (current_identity and final_identity and final_identity != current_identity)
+        ):
+            raise MigrationBlocked(f"源文件在计算哈希时发生变化：{item.rel_path}")
+        self.store.set_inventory_sha256(item.id, digest)
+        item.sha256 = digest
         return source
 
     def _destination_parent(self, project: Project, rel_path: str) -> str:
