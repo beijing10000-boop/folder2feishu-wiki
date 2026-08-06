@@ -2154,7 +2154,9 @@ function App() {
                     label="数据量"
                     value={formatBytes(scan.summary.bytes)}
                     note={
-                      scan.summary.hashes_reused
+                      scan.summary.hashes_deferred
+                        ? `快速盘点：已延后 ${scan.summary.hashes_deferred.toLocaleString()} 个新文件哈希，迁移时按需计算`
+                        : scan.summary.hashes_reused
                         ? `已复用 ${scan.summary.hashes_reused.toLocaleString()} 个文件哈希`
                         : scanActive
                           ? scan.summary.megabytes_per_second

@@ -76,7 +76,7 @@ class _CachedDigest:
     file_identity: str
     size: int
     mtime_ns: int
-    sha256: str
+    sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +93,7 @@ class _FileCandidate:
     is_recall_on_data_access: bool
     file_identity: str | None
     cached_sha256: str | None
+    defer_hash: bool
 
 
 def portable_rel(path: Path, root: Path) -> str:
@@ -197,11 +198,19 @@ def _windows_file_identity(path: Path) -> str | None:
 def file_identity(stat_result: os.stat_result, path: Path | None = None) -> str | None:
     """Return a volume/inode identity without opening or changing the file."""
 
+    # Python can expose different Windows st_dev/st_ino representations for
+    # DirEntry.stat() and Path.stat() on the same file. Prefer the native
+    # volume/file index whenever a path is available so scan-time and
+    # upload-time checks remain comparable.
+    if os.name == "nt" and path is not None:
+        windows_identity = _windows_file_identity(path)
+        if windows_identity:
+            return windows_identity
     device = int(getattr(stat_result, "st_dev", 0) or 0)
     inode = int(getattr(stat_result, "st_ino", 0) or 0)
     if inode:
         return f"{device:x}:{inode:x}"
-    return _windows_file_identity(path) if path is not None else None
+    return None
 
 
 def file_attribute_flags(attributes: int) -> tuple[bool, bool, bool]:
@@ -277,6 +286,7 @@ class InventoryScanner:
         progress_interval: int = 100,
         hash_workers: int = 8,
         hash_queue_size: int | None = None,
+        defer_new_hashes: bool = False,
     ):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
@@ -287,17 +297,18 @@ class InventoryScanner:
         self.progress_interval = max(1, progress_interval)
         self.hash_workers = hash_workers
         self.hash_queue_size = max(hash_workers, hash_queue_size or hash_workers * 8)
+        self.defer_new_hashes = bool(defer_new_hashes)
 
     def _digest_caches(
         self,
         project_id: str,
     ) -> tuple[dict[str, _CachedDigest], dict[str, _CachedDigest]]:
-        """Load only reusable digests from the previous inventory.
+        """Load reusable file fingerprints from the previous inventory.
 
-        A hash is reusable only when the stable file identity, size, and
-        nanosecond modification time all still match. Duplicate identities
-        (for example hard links or stale moved rows) are never used for
-        identity-only matching.
+        A digest, or an intentionally deferred digest, is reusable only when
+        the stable file identity, size, and nanosecond modification time all
+        still match. Duplicate identities (for example hard links or stale
+        moved rows) are never used for identity-only matching.
         """
 
         by_path: dict[str, _CachedDigest] = {}
@@ -305,10 +316,10 @@ class InventoryScanner:
         duplicate_identities: set[str] = set()
         for item in self.store.list_inventory(project_id, kind=ItemKind.FILE):
             if (
-                not item.sha256
-                or not item.file_identity
+                not item.file_identity
                 or item.size is None
                 or item.mtime_ns is None
+                or (not item.sha256 and item.state != InventoryState.DISCOVERED)
             ):
                 continue
             cached = _CachedDigest(
@@ -327,7 +338,7 @@ class InventoryScanner:
         return by_path, by_identity
 
     @staticmethod
-    def _cached_digest(
+    def _cached_fingerprint(
         rel_path: str,
         *,
         file_identity_value: str | None,
@@ -335,7 +346,7 @@ class InventoryScanner:
         mtime_ns: int,
         by_path: dict[str, _CachedDigest],
         by_identity: dict[str, _CachedDigest],
-    ) -> str | None:
+    ) -> _CachedDigest | None:
         if not file_identity_value:
             return None
         candidates = (
@@ -349,7 +360,7 @@ class InventoryScanner:
                 and cached.size == size
                 and cached.mtime_ns == mtime_ns
             ):
-                return cached.sha256
+                return cached
         return None
 
     def scan(
@@ -365,6 +376,9 @@ class InventoryScanner:
         project = self.store.get_project(project_id)
         root = Path(source_root or project.source_root).expanduser().absolute()
         digest_by_path, digest_by_identity = self._digest_caches(project_id)
+        defer_fresh_hashes = (
+            self.defer_new_hashes and self.store.count_remote_mappings(project_id) == 0
+        )
         scan_id = uuid.uuid4().hex
         if run_id:
             run = self.store.get_job_run(run_id)
@@ -374,7 +388,11 @@ class InventoryScanner:
                 scan_id=scan_id,
                 current_stage="SCANNING",
                 current_item="",
-                last_message="正在读取本地目录并计算文件指纹",
+                last_message=(
+                    "正在快速读取本地目录；文件哈希将在迁移时按需计算"
+                    if defer_fresh_hashes
+                    else "正在读取本地目录并计算文件指纹"
+                ),
                 heartbeat_at=utc_now(),
                 started_at=run.started_at or utc_now(),
                 finished_at=None,
@@ -411,6 +429,7 @@ class InventoryScanner:
         hash_stats = {
             "hashes_computed": 0,
             "hashes_reused": 0,
+            "hashes_deferred": 0,
         }
         hash_executor = ThreadPoolExecutor(
             max_workers=self.hash_workers,
@@ -505,7 +524,12 @@ class InventoryScanner:
             if _is_cancelled(cancel):
                 raise ScanCancelled("scan cancelled")
 
-        def record_file(candidate: _FileCandidate, digest: str | None) -> None:
+        def record_file(
+            candidate: _FileCandidate,
+            digest: str | None,
+            *,
+            deferred: bool = False,
+        ) -> None:
             size = int(candidate.stat_result.st_size)
             placeholder = (
                 candidate.is_offline
@@ -513,7 +537,7 @@ class InventoryScanner:
                 or candidate.is_recall_on_data_access
             )
             manual = (
-                (digest is None and not placeholder)
+                (digest is None and not placeholder and not deferred)
                 or len(candidate.name) > MAX_FEISHU_NAME_LENGTH
                 or candidate.depth > MAX_WIKI_LOCAL_DEPTH
             )
@@ -593,6 +617,10 @@ class InventoryScanner:
                 or candidate.is_recall_on_data_access
             ):
                 record_file(candidate, None)
+                return
+            if candidate.defer_hash:
+                hash_stats["hashes_deferred"] += 1
+                record_file(candidate, None, deferred=True)
                 return
             if candidate.cached_sha256 is not None:
                 future = hash_executor.submit(
@@ -778,13 +806,18 @@ class InventoryScanner:
                             if file_offline or file_recall_open or file_recall_data
                             else file_identity(stat_result, source_path)
                         )
-                        cached_sha256 = self._cached_digest(
+                        cached = self._cached_fingerprint(
                             child_rel,
                             file_identity_value=identity,
                             size=size,
                             mtime_ns=int(stat_result.st_mtime_ns),
                             by_path=digest_by_path,
                             by_identity=digest_by_identity,
+                        )
+                        cached_sha256 = cached.sha256 if cached is not None else None
+                        defer_hash = bool(
+                            (cached is not None and cached.sha256 is None)
+                            or (cached is None and defer_fresh_hashes)
                         )
                         queue_file(
                             _FileCandidate(
@@ -800,6 +833,7 @@ class InventoryScanner:
                                 is_recall_on_data_access=file_recall_data,
                                 file_identity=identity,
                                 cached_sha256=cached_sha256,
+                                defer_hash=defer_hash,
                             )
                         )
 

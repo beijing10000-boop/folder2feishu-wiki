@@ -239,6 +239,50 @@ def test_unchanged_second_scan_reuses_previous_hashes(tmp_path, monkeypatch):
         store.close()
 
 
+def test_fast_initial_scan_defers_new_file_hashes_until_migration(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.txt").write_bytes(b"one")
+    (source / "two.txt").write_bytes(b"two")
+
+    def unexpected_hash(*args, **kwargs):
+        raise AssertionError("fast initial inventory must not read entire file contents")
+
+    monkeypatch.setattr(scanner_module, "sha256_file", unexpected_hash)
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="fast-initial", source_root=source)
+        scanner = InventoryScanner(store, defer_new_hashes=True, hash_workers=2)
+
+        first = scanner.scan(project.id)
+        assert first.complete
+        first_summary = store.get_job_run(first.run_id).summary
+        assert first_summary["hashes_deferred"] == 2
+        assert first_summary["hashes_computed"] == 0
+        files = store.list_inventory(project.id, kind=ItemKind.FILE, present=True)
+        assert len(files) == 2
+        assert all(item.sha256 is None for item in files)
+        assert all(item.state == InventoryState.DISCOVERED for item in files)
+
+        plan = MigrationPlanner(store).build(project.id)
+        assert not plan.blocked
+        assert {
+            action.action_type
+            for action in store.list_plan_actions(project.id, plan_id=plan.plan_id)
+            if action.source_rel_path
+        } == {ActionType.UPLOAD}
+
+        # Restarting or rescanning before migration must keep the quick
+        # fingerprint without falling back to hashing every file.
+        second = scanner.scan(project.id)
+        assert second.complete
+        second_summary = store.get_job_run(second.run_id).summary
+        assert second_summary["hashes_deferred"] == 2
+        assert second_summary["hashes_computed"] == 0
+    finally:
+        store.close()
+
+
 def test_changed_file_is_rehashed_while_unchanged_file_is_reused(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()

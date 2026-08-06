@@ -83,7 +83,11 @@ class ApplicationServices:
         self.settings_store = SettingsStore(self.paths)
         self.credentials = credentials or create_credential_store(self.paths.credentials)
         self.store = CoreStore(self.paths.database)
-        self.scanner = InventoryScanner(self.store)
+        # A new project has no remote mapping to compare against, so reading
+        # every byte only to build the initial directory view is unnecessary.
+        # The executor computes and persists the digest immediately before the
+        # first upload. Incremental scans still hash changed mapped files.
+        self.scanner = InventoryScanner(self.store, defer_new_hashes=True)
         self.planner = MigrationPlanner(self.store)
         self.jobs = BackgroundJobManager(max_workers=2)
         self._lock = threading.RLock()
@@ -488,6 +492,7 @@ class ApplicationServices:
             **summary,
             "hashes_computed": int(scan_run_summary.get("hashes_computed", 0)),
             "hashes_reused": int(scan_run_summary.get("hashes_reused", 0)),
+            "hashes_deferred": int(scan_run_summary.get("hashes_deferred", 0)),
             "hash_workers": int(scan_run_summary.get("hash_workers", 0)),
             "elapsed_seconds": float(scan_run_summary.get("elapsed_seconds", 0)),
             "items_per_second": float(scan_run_summary.get("items_per_second", 0)),

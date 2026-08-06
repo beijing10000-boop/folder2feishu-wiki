@@ -163,6 +163,11 @@ const normalizeScan = (raw: Record<string, any>): ScanResult => {
       upload_calls: counts.upload_calls ?? raw.estimated_upload_calls ?? 0,
       hashes_computed: counts.hashes_computed ?? 0,
       hashes_reused: counts.hashes_reused ?? 0,
+      hashes_deferred: counts.hashes_deferred ?? 0,
+      hash_workers: counts.hash_workers ?? 0,
+      elapsed_seconds: counts.elapsed_seconds ?? 0,
+      items_per_second: counts.items_per_second ?? 0,
+      megabytes_per_second: counts.megabytes_per_second ?? 0,
       estimated_days: counts.estimated_days ?? raw.estimated_days ?? 0,
       scan_complete: raw.complete ?? counts.scan_complete ?? status === "COMPLETED"
     },

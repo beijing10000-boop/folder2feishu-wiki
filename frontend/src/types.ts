@@ -110,6 +110,7 @@ export interface InventorySummary {
   upload_calls: number;
   hashes_computed?: number;
   hashes_reused?: number;
+  hashes_deferred?: number;
   hash_workers?: number;
   elapsed_seconds?: number;
   items_per_second?: number;

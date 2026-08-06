@@ -388,6 +388,21 @@ class CoreStore:
         with self.session() as session:
             return list(session.scalars(statement))
 
+    def set_inventory_sha256(self, item_id: str, digest: str) -> None:
+        """Persist a deferred digest immediately before the first upload."""
+
+        normalized = digest.strip().casefold()
+        if len(normalized) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized
+        ):
+            raise ValueError("sha256 digest must contain 64 hexadecimal characters")
+        with self.session() as session:
+            item = session.get(InventoryItem, item_id)
+            if item is None:
+                raise KeyError(f"inventory item not found: {item_id}")
+            item.sha256 = normalized
+            item.updated_at = utc_now()
+
     def add_scan_issues(
         self, project_id: str, scan_id: str, issues: Iterable[Mapping[str, Any]]
     ) -> int:
