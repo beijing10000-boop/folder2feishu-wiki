@@ -257,6 +257,82 @@ def test_upload_all_always_sends_nonempty_parent_and_persists_before_rename(tmp_
     assert not any(request.method == "GET" for request in seen_requests)
 
 
+def test_direct_upload_can_use_final_name_without_patch_rename(tmp_path):
+    source = tmp_path / "原始文件名.xlsx"
+    source.write_bytes(b"content")
+    methods: list[str] = []
+    hooks = CapturingHooks()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        assert request.method == "POST"
+        assert request.url.path.endswith("/upload_all")
+        content = request.read()
+        assert source.name.encode("utf-8") in content
+        assert b".f2fw-" not in content
+        return httpx.Response(200, json={"code": 0, "data": {"file_token": "file-1"}})
+
+    staged = _service(handler).stage_file(
+        source,
+        parent_node="target-folder",
+        project_id="project-A",
+        item_key="folder/原始文件名.xlsx",
+        hooks=hooks,
+        probe_existing=False,
+        use_final_name=True,
+    )
+
+    assert staged.file_token == "file-1"
+    assert staged.internal_name == source.name
+    assert staged.final_name == source.name
+    assert methods == ["POST"]
+    assert hooks.events == [("file", "file-1")]
+
+
+def test_direct_final_name_reconciles_ambiguous_upload_without_patch_or_repost(tmp_path):
+    source = tmp_path / "report.xlsx"
+    source.write_bytes(b"committed despite response")
+    hooks = CapturingHooks()
+    lists = uploads = patches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal lists, uploads, patches
+        if request.method == "GET":
+            lists += 1
+            files = (
+                []
+                if lists == 1
+                else [{"name": source.name, "type": "file", "token": "committed-file"}]
+            )
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"files": files, "has_more": False}},
+            )
+        if request.url.path.endswith("/upload_all"):
+            uploads += 1
+            return httpx.Response(
+                503,
+                json={"code": 500001, "msg": "response lost after commit"},
+            )
+        if request.method == "PATCH":
+            patches += 1
+        raise AssertionError(request.url)
+
+    staged = _service(handler).stage_file(
+        source,
+        parent_node="target-folder",
+        project_id="project-A",
+        item_key="folder/report.xlsx",
+        hooks=hooks,
+        use_final_name=True,
+    )
+
+    assert staged.file_token == "committed-file"
+    assert staged.internal_name == staged.final_name == source.name
+    assert (uploads, lists, patches) == (1, 2, 0)
+    assert hooks.events == [("file", "committed-file")]
+
+
 def test_upload_all_5xx_is_reconciled_by_staging_name_without_reposting(tmp_path):
     source = tmp_path / "report.xlsx"
     source.write_bytes(b"committed despite response")

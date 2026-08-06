@@ -409,10 +409,7 @@ def create_app(
                 request.method == "GET"
                 and status_code < 400
                 and duration < 1.0
-                and (
-                    path == "/api/v2/runtime/logs"
-                    or path.startswith("/api/v2/runs/")
-                )
+                and (path == "/api/v2/runtime/logs" or path.startswith("/api/v2/runs/"))
             )
             # The run page polls these two local endpoints every few seconds. Keep
             # metrics for diagnostics, but do not flood the operator log with

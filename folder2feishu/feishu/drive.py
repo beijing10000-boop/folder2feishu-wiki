@@ -500,10 +500,15 @@ class DriveService:
         resume_session: UploadSession | None = None,
         hooks: PersistenceHooks | None = None,
         probe_existing: bool = True,
+        use_final_name: bool = False,
     ) -> StagedFile:
         path = Path(local_path)
         final_name = _validate_file_name(original_name or path.name)
-        internal_name = deterministic_staging_name(project_id, item_key, final_name)
+        internal_name = (
+            final_name
+            if use_final_name
+            else deterministic_staging_name(project_id, item_key, final_name)
+        )
         active_hooks = hooks or NullPersistenceHooks()
 
         # A fresh ledger action cannot have committed a remote staging object,
@@ -515,7 +520,8 @@ class DriveService:
         )
         if existing_token:
             active_hooks.on_file_token(existing_token)
-            self.rename_file(existing_token, final_name)
+            if internal_name != final_name:
+                self.rename_file(existing_token, final_name)
             return StagedFile(existing_token, internal_name, final_name)
 
         try:
@@ -533,7 +539,8 @@ class DriveService:
             token = reconciled_token
             active_hooks.on_file_token(token)
 
-        self.rename_file(token, final_name)
+        if internal_name != final_name:
+            self.rename_file(token, final_name)
         return StagedFile(token, internal_name, final_name)
 
     def upload_file(

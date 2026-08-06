@@ -996,19 +996,34 @@ class MigrationExecutor:
         current = self.store.get_plan_action(action.id)
         token = current.drive_file_token or current.object_token or current.wiki_node_token
         if token:
-            # The upload response token is persisted before the title restore.
-            # On a crash resume, renaming that exact token is idempotent and
-            # avoids enumerating a potentially 1,500-item parent directory.
-            self.drive.rename_file(token, item.name, object_type="file")
+            # RC.5 and earlier persisted the upload token before restoring the
+            # deterministic staging title. Keep that legacy resume operation
+            # idempotent, while new final-title uploads need no PATCH request.
+            if (current.details or {}).get("upload_title_strategy") != "final":
+                self.drive.rename_file(token, item.name, object_type="file")
         else:
+            resume_session = hooks.resume_upload_session()
             recover_existing = current.state not in {
                 MigrationState.DISCOVERED,
                 MigrationState.PLANNED,
             }
+            title_strategy = str((current.details or {}).get("upload_title_strategy") or "")
+            if not title_strategy:
+                # New direct-to-Drive uploads can use the requested final title
+                # immediately. This removes one PATCH rename per file, whose
+                # Feishu endpoint is limited to roughly 20 requests/minute.
+                # Legacy/restarted actions retain deterministic staging names so
+                # an in-flight RC.5 upload can still resume without duplication.
+                title_strategy = (
+                    "final" if not recover_existing and resume_session is None else "deterministic"
+                )
             self.store.update_plan_action(
                 action.id,
                 state=MigrationState.UPLOADING,
-                merge_details={"destination_parent_token": parent_token},
+                merge_details={
+                    "destination_parent_token": parent_token,
+                    "upload_title_strategy": title_strategy,
+                },
             )
             staged = self.drive.stage_file(
                 source,
@@ -1016,9 +1031,10 @@ class MigrationExecutor:
                 project_id=project.id,
                 item_key=item.id,
                 original_name=item.name,
-                resume_session=hooks.resume_upload_session(),
+                resume_session=resume_session,
                 hooks=hooks,
                 probe_existing=recover_existing,
+                use_final_name=title_strategy == "final",
             )
             token = staged.file_token
         # Successful upload/rename responses are authoritative for the fast
