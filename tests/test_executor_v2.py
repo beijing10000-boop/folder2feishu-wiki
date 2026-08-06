@@ -64,6 +64,7 @@ class FakeDrive:
         original_name: str | None = None,
         resume_session: Any = None,
         hooks: Any = None,
+        use_final_name: bool = False,
     ) -> StagedFile:
         del parent_node, project_id, resume_session
         self.item_keys.append(item_key)
@@ -72,7 +73,8 @@ class FakeDrive:
         name = original_name or local_path.name
         self.names[token] = name
         hooks.on_file_token(token)
-        return StagedFile(token, f"internal-{token}", name)
+        internal_name = name if use_final_name else f"internal-{token}"
+        return StagedFile(token, internal_name, name)
 
     def rename_file(self, file_token: str, new_title: str, *, object_type: str = "file") -> str:
         assert object_type == "file"
@@ -529,6 +531,12 @@ def test_drive_version_update_moves_old_file_to_global_history_tree(
     first = executor.execute(project_id)
     assert first.failed == first.conflicts == 0
     assert drive.uploads == 2
+    assert drive.renames == []
+    assert all(
+        action.details.get("upload_title_strategy") == "final"
+        for action in store.list_plan_actions(project_id)
+        if action.action_type == ActionType.UPLOAD
+    )
 
     source = Path(store.get_project(project_id).source_root)
     changed = source / "部门 A" / "中文 & report (1).xlsx"
@@ -564,6 +572,45 @@ def test_drive_version_update_moves_old_file_to_global_history_tree(
     unchanged = MigrationPlanner(store).build(project_id)
     assert unchanged.counts[ActionType.SKIP.value] == unchanged.total_actions
     assert drive.uploads == 3
+
+
+def test_direct_drive_resumes_legacy_uploaded_token_with_one_title_restore(
+    tmp_path: Path,
+) -> None:
+    store, project_id, _drive, _wiki = _build(tmp_path)
+    upload_action = next(
+        action
+        for action in store.list_plan_actions(project_id)
+        if action.action_type == ActionType.UPLOAD
+    )
+    item = store.get_inventory_items([upload_action.inventory_item_id])[
+        upload_action.inventory_item_id
+    ]
+    legacy_token = "legacy-staged-file"
+    store.update_plan_action(
+        upload_action.id,
+        state=MigrationState.DRIVE_UPLOADED,
+        drive_file_token=legacy_token,
+    )
+    drive = FakeDirectDrive()
+    drive.nodes[legacy_token] = {
+        "parent": "legacy-staging-parent",
+        "name": deterministic_staging_name(project_id, item.id, item.name),
+        "type": "file",
+    }
+
+    result = MigrationExecutor(
+        store,
+        drive,  # type: ignore[arg-type]
+        FakeWiki(drive),  # type: ignore[arg-type]
+        DailyQuotaStore(tmp_path / "legacy-resume-quota.json"),
+        drive_direct=True,
+    ).execute(project_id)
+
+    assert result.failed == result.conflicts == 0
+    assert (legacy_token, item.name) in drive.renames
+    assert drive.nodes[legacy_token]["name"] == item.name
+    assert drive.uploads == 1
 
 
 def test_unexpected_single_file_error_is_isolated_and_other_files_continue(
