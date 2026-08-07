@@ -28,7 +28,7 @@ V4 延续云盘直传架构，并兼容 V3 的配置、数据库、断点台账�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v4.0.0/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v4.0.1/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
