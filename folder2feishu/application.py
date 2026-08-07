@@ -18,6 +18,7 @@ from .core import (
     MigrationPlanner,
     MigrationState,
     Project,
+    RunType,
 )
 from .core.limits import DRIVE_MAX_CHILDREN, DRIVE_MAX_DEPTH, DRIVE_MAX_TREE_NODES
 from .executor import MigrationExecutor, RemoteReconciler
@@ -89,6 +90,10 @@ class ApplicationServices:
         self.jobs = BackgroundJobManager(max_workers=2)
         self._lock = threading.RLock()
         self._client: FeishuAPIClient | None = None
+        # Executors retain their DriveService for the whole background run.
+        # Replaced clients are therefore retired and closed only after all jobs
+        # have stopped during application shutdown.
+        self._retired_clients: list[FeishuAPIClient] = []
         self._token_provider: StoredUserTokenProvider | None = None
         self._client_settings_key = ""
         self._api_client_key = ""
@@ -97,9 +102,13 @@ class ApplicationServices:
     def close(self) -> None:
         self.jobs.close()
         with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
+            clients = [*self._retired_clients]
+            if self._client is not None:
+                clients.append(self._client)
+            self._client = None
+            self._retired_clients = []
+        for client in dict.fromkeys(clients):
+            client.close()
         self.store.close()
 
     def public_settings(self) -> dict[str, Any]:
@@ -114,12 +123,39 @@ class ApplicationServices:
         self, settings: PublicSettings, *, app_secret: str | None = None
     ) -> dict[str, Any]:
         previous = self.settings_store.load()
+        current_secret = self.credentials.get("feishu.app_secret") or ""
+        secret_changed = app_secret is not None and app_secret != current_secret
+        connection_changed = secret_changed or any(
+            (
+                previous.app_id != settings.app_id,
+                previous.redirect_uri != settings.redirect_uri,
+                previous.scopes != settings.scopes,
+                previous.upload_qps != settings.upload_qps,
+                previous.wiki_calls_per_minute != settings.wiki_calls_per_minute,
+            )
+        )
+
+        if connection_changed and self._active_migration_run() is not None:
+            raise ValueError(
+                "迁移任务正在运行或暂停，飞书连接配置已锁定。"
+                "请先在运行对账页停止当前任务，再修改或重新验证配置。"
+            )
+
+        # The configuration page saves the same payload from multiple
+        # verification cards. Identical saves must not tear down the shared
+        # client held by a running migration executor.
+        settings_changed = previous != settings
+        if not settings_changed and not secret_changed:
+            return self.public_settings()
+
         if previous.app_id and previous.app_id != settings.app_id:
             self.credentials.delete("feishu.user_token_bundle")
-        self.settings_store.save(settings)
-        if app_secret:
+        if settings_changed:
+            self.settings_store.save(settings)
+        if secret_changed and app_secret is not None:
             save_app_secret(self.credentials, app_secret)
-        self._reset_feishu_client()
+        if connection_changed:
+            self._reset_feishu_client()
         return self.public_settings()
 
     def auth_status(self) -> dict[str, Any]:
@@ -225,7 +261,7 @@ class ApplicationServices:
         with self._lock:
             if self._client is None or self._api_client_key != key:
                 if self._client:
-                    self._client.close()
+                    self._retired_clients.append(self._client)
                 drive_limiter = IntervalRateLimiter(settings.upload_qps, 1)
                 wiki_limiter = IntervalRateLimiter(
                     settings.wiki_calls_per_minute,
@@ -619,11 +655,20 @@ class ApplicationServices:
     def _reset_feishu_client(self) -> None:
         with self._lock:
             if self._client:
-                self._client.close()
+                self._retired_clients.append(self._client)
             self._client = None
             self._token_provider = None
             self._client_settings_key = ""
             self._api_client_key = ""
+
+    def _active_migration_run(self) -> Any | None:
+        """Return durable active migration work across every local project."""
+
+        for project in self.store.list_projects():
+            run = self.store.find_active_job_run(project.id, RunType.MIGRATION)
+            if run is not None:
+                return run
+        return None
 
     @staticmethod
     def _quota_capacity_check(
