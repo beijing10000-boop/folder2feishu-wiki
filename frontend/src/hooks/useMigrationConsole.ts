@@ -77,6 +77,9 @@ export function useMigrationConsole() {
     window.setTimeout(() => setNotice(undefined), 4200);
   }, []);
 
+  const connectionSettingsLocked =
+    run?.state === "RUNNING" || run?.state === "PAUSED";
+
   const showError = useCallback(
     (error: unknown) => {
       const message =
@@ -345,6 +348,10 @@ export function useMigrationConsole() {
     });
 
   const validateApp = async (): Promise<boolean> => {
+    if (connectionSettingsLocked) {
+      notify("迁移任务正在运行或暂停，请先在运行对账页停止任务后再修改或验证连接配置。", "warning");
+      return false;
+    }
     markValidation("app", "checking", "正在由后端校验并安全保存应用配置…");
     if (!settings.app_id.trim() || (!settings.app_secret_configured && !secret.trim())) {
       markValidation("app", "failed", "必须填写应用编号；首次配置还必须填写应用密钥");
@@ -372,6 +379,10 @@ export function useMigrationConsole() {
   };
 
   const validateThrottle = async (): Promise<boolean> => {
+    if (connectionSettingsLocked) {
+      notify("迁移任务正在运行或暂停，请先在运行对账页停止任务后再修改或验证连接配置。", "warning");
+      return false;
+    }
     markValidation("throttle", "checking", "正在验证云盘上传速率…");
     if (!throttleValid()) {
       markValidation("throttle", "failed", "每秒上传请求数必须大于 0 且不超过 5");
@@ -508,6 +519,10 @@ export function useMigrationConsole() {
 
   const validateAll = async (event?: FormEvent): Promise<void> => {
     event?.preventDefault();
+    if (connectionSettingsLocked) {
+      notify("迁移任务正在运行或暂停，连接配置已锁定。请返回运行对账页停止任务后再验证。", "warning");
+      return;
+    }
     setBusy("validate-all");
     try {
       const appOk = await validateApp();
@@ -809,8 +824,8 @@ export function useMigrationConsole() {
     validation, actionFilter, setActionFilter, runFilter, setRunFilter, busy, booting, bootError,
     notice, setNotice,
     // derived
-    configReady, scanActive, blocking, progress, byteProgress, runProcessed, passedCount,
-    filteredActions, filteredRunItems, stepStatus, stepEnabled, stepDisabledReason,
+    configReady, scanActive, connectionSettingsLocked, blocking, progress, byteProgress,
+    runProcessed, passedCount, filteredActions, filteredRunItems, stepStatus, stepEnabled, stepDisabledReason,
     // commands
     notify, showError, markValidation, invalidateDownstream, loadTreeChildren, validateApp,
     validateThrottle, validateOauth, validateSource, validateTarget, validatePolicy, validateAll,
