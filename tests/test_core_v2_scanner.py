@@ -23,6 +23,56 @@ from folder2feishu.core.scanner import (
 )
 
 
+def _nested_directory(root, depth: int):
+    current = root
+    for index in range(1, depth + 1):
+        current = current / f"level-{index:02}"
+    current.mkdir(parents=True)
+    return current
+
+
+def test_scanner_reserves_one_drive_level_for_project_wrapper(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _nested_directory(source, 14)
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="depth-14", source_root=source)
+        result = InventoryScanner(store).scan(project.id)
+
+        depth_issues = [
+            issue
+            for issue in store.list_issues(project.id, scan_id=result.scan_id)
+            if issue.code == IssueCode.WIKI_DEPTH_LIMIT
+        ]
+        assert not depth_issues
+    finally:
+        store.close()
+
+
+def test_scanner_blocks_local_depth_fifteen_before_preflight(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _nested_directory(source, 15)
+
+    store = CoreStore(tmp_path / "ledger.db")
+    try:
+        project = store.create_project(name="depth-15", source_root=source)
+        result = InventoryScanner(store).scan(project.id)
+
+        depth_issues = [
+            issue
+            for issue in store.list_issues(project.id, scan_id=result.scan_id)
+            if issue.code == IssueCode.WIKI_DEPTH_LIMIT
+        ]
+        assert len(depth_issues) == 1
+        assert depth_issues[0].severity == IssueSeverity.BLOCKING
+        assert depth_issues[0].details == {"depth": 15, "safe_local_limit": 14}
+    finally:
+        store.close()
+
+
 def test_scanner_preserves_root_empty_directories_names_and_hashes(tmp_path):
     source = tmp_path / "Team FabDazzle - 文档"
     (source / "Apparel & Design" / "空目录").mkdir(parents=True)

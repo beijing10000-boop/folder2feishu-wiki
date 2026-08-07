@@ -24,14 +24,16 @@ from .enums import (
     RunStatus,
     RunType,
 )
+from .limits import (
+    DRIVE_MAX_CHILDREN,
+    DRIVE_MAX_LOCAL_DEPTH,
+    MAX_FEISHU_NAME_LENGTH,
+)
 from .models import utc_now
 
 FILE_ATTRIBUTE_OFFLINE = 0x00001000
 FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
-MAX_FEISHU_NAME_LENGTH = 250
-MAX_WIKI_LOCAL_DEPTH = 49
-MAX_WIKI_CHILDREN = 2_000
 # A reusable 16 MiB buffer materially reduces Python allocations and read
 # syscalls while keeping cancellation responsive.  At the maximum supported
 # 16 workers the upper bound is 256 MiB, which is acceptable for a desktop
@@ -539,7 +541,7 @@ class InventoryScanner:
             manual = (
                 (digest is None and not placeholder and not deferred)
                 or len(candidate.name) > MAX_FEISHU_NAME_LENGTH
-                or candidate.depth > MAX_WIKI_LOCAL_DEPTH
+                or candidate.depth > DRIVE_MAX_LOCAL_DEPTH
             )
             item_batch.append(
                 {
@@ -672,7 +674,8 @@ class InventoryScanner:
                     attrs = int(getattr(directory_stat, "st_file_attributes", 0) or 0)
                     offline, recall_open, recall_data = file_attribute_flags(attrs)
                     manual = (
-                        len(directory.name) > MAX_FEISHU_NAME_LENGTH or depth > MAX_WIKI_LOCAL_DEPTH
+                        len(directory.name) > MAX_FEISHU_NAME_LENGTH
+                        or depth > DRIVE_MAX_LOCAL_DEPTH
                     )
                     item_batch.append(
                         {
@@ -738,16 +741,16 @@ class InventoryScanner:
                         )
                         continue
 
-                    if len(entries) > MAX_WIKI_CHILDREN:
+                    if len(entries) > DRIVE_MAX_CHILDREN:
                         add_issue(
                             IssueCode.WIKI_CHILD_LIMIT,
                             IssueSeverity.BLOCKING,
-                            f"directory has {len(entries)} children; Wiki allows "
-                            f"at most {MAX_WIKI_CHILDREN}",
+                            f"directory has {len(entries)} children; Drive allows "
+                            f"at most {DRIVE_MAX_CHILDREN}",
                             rel_path,
                             details={
                                 "children": len(entries),
-                                "limit": MAX_WIKI_CHILDREN,
+                                "limit": DRIVE_MAX_CHILDREN,
                             },
                         )
 
@@ -963,13 +966,13 @@ class InventoryScanner:
                 rel_path,
                 details={"length": len(name), "limit": MAX_FEISHU_NAME_LENGTH},
             )
-        if depth > MAX_WIKI_LOCAL_DEPTH:
+        if depth > DRIVE_MAX_LOCAL_DEPTH:
             add_issue(
                 IssueCode.WIKI_DEPTH_LIMIT,
                 IssueSeverity.BLOCKING,
-                f"local depth {depth} cannot fit safely below the Wiki target",
+                f"local depth {depth} cannot fit safely below the Drive target",
                 rel_path,
-                details={"depth": depth, "safe_local_limit": MAX_WIKI_LOCAL_DEPTH},
+                details={"depth": depth, "safe_local_limit": DRIVE_MAX_LOCAL_DEPTH},
             )
         if offline or recall_open or recall_data:
             add_issue(

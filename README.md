@@ -1,8 +1,8 @@
-# Folder2Feishu Drive v3
+# Folder2Feishu Drive V4
 
 把 Windows 本地目录按原层级直接迁移到飞书云盘。
 
-v3 是独立的新程序：不读取 v2 知识库版的配置、数据库或迁移记录，也不会处理已经迁入知识库的数据。文件不再经过知识库迁入，目录直接对应云盘文件夹，Word、Excel、PPTX、PDF、图片、视频等均保留原格式。
+V4 延续云盘直传架构，并兼容 V3 的配置、数据库、断点台账和项目运行目录。文件不经过知识库迁入，目录直接对应云盘文件夹，Word、Excel、PPTX、PDF、图片、视频等均保留原格式。
 
 ## 主要能力
 
@@ -28,7 +28,7 @@ v3 是独立的新程序：不读取 v2 知识库版的配置、数据库或迁�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v3.0.0-rc.8/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v4.0.0/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
@@ -36,10 +36,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubu
 ## 一条命令升级
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "D:\Folder2FeishuDrive\App\Update-Folder2Feishu.ps1" -IncludePrerelease
+powershell -NoProfile -ExecutionPolicy Bypass -File "D:\Folder2FeishuDrive\App\Update-Folder2Feishu.ps1"
 ```
 
-升级会保留 v3 的配置与断点台账。v2 知识库版位于不同目录，不会被覆盖。
+从 V3 升级到 V4 会保留配置、凭据、项目数据库、断点台账和日志。v2 知识库版位于不同目录，不会被覆盖。
 
 ## 运行目录
 
@@ -73,14 +73,16 @@ http://127.0.0.1:8000/oauth/callback
 ## 使用流程
 
 1. 配置：填写应用凭据、完成用户授权、设置上传速率、选择本地目录和目标云盘文件夹。
-2. 盘点：只读扫描文件、目录、大小、时间、文件标识和 SHA-256。
+2. 盘点：只读扫描文件、目录、大小、时间和文件标识；仅在需要上传或元数据变化时计算 SHA-256。
 3. 预检：检查授权、云盘容量、目录深度、单层对象数、占位文件和名称限制。
 4. 差异计划：确认每一项创建、上传、移动、改名、换版、跳过或冲突动作。
 5. 运行对账：后台执行并显示进度、当前对象、心跳、预计剩余时间、分片进度与实时日志。
 
 若盘点中仍有 OneDrive 云端占位文件，预检只显示黄色提醒，不阻断其他文件。待 OneDrive 下载完成后，请依次执行“重新只读盘点 → 预检 → 生成新的差异计划 → 开始迁移”；不要使用“重试失败项”，因为占位文件属于本轮延迟项而不是失败项。
 
-迁移执行器使用有界滑动队列：任一文件完成后立即补入下一项，不会因为同批次中仍有超大文件而让其他工作线程空等。多个大文件可以同时占用不同工作线程，但全部云盘写请求仍共同遵守每秒 5 次的安全上限，并在飞书返回限流时自动冷却。
+迁移执行器使用有界滑动队列：任一文件完成后立即补入下一项，不会因为同批次中仍有超大文件而让其他工作线程空等。多个大文件可以同时占用不同工作线程，但全部云盘写请求仍共同遵守每秒 5 次的安全上限，并在飞书返回限流时自动冷却。V4 修复了退避等待、限速锁竞争和工作租约释放问题，临时网络故障不会触发无间隔重试。
+
+飞书云盘完整路径最多 15 层。程序会为每个项目建立一层独立根目录，因此本地目录最多允许 14 层；盘点阶段会直接指出超限路径，不再等到预检阶段才阻断。
 
 正式全量前请先用 3–10 个代表性文件做试迁，其中包含三级目录和一个大于 20 MB 的文件。
 

@@ -19,6 +19,7 @@ from .core import (
     MigrationState,
     Project,
 )
+from .core.limits import DRIVE_MAX_CHILDREN, DRIVE_MAX_DEPTH, DRIVE_MAX_TREE_NODES
 from .executor import MigrationExecutor, RemoteReconciler
 from .feishu import (
     DEFAULT_SCOPES,
@@ -48,10 +49,6 @@ from .verification import (
     verify_oauth_identity,
     verify_source_root,
 )
-
-DRIVE_MAX_CHILDREN = 1_500
-DRIVE_MAX_DEPTH = 15
-DRIVE_MAX_TREE_NODES = 400_000
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,6 +4,8 @@ import importlib
 import json
 import os
 import threading
+import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -150,6 +152,21 @@ class DailyQuotaStore:
 
     def _write(self, value: dict[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
-        temporary.replace(self.path)
+        temporary = self.path.with_name(
+            f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with temporary.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(json.dumps(value, separators=(",", ":")))
+                stream.flush()
+                os.fsync(stream.fileno())
+            for attempt in range(6):
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.01 * (2**attempt))
+        finally:
+            temporary.unlink(missing_ok=True)

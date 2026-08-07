@@ -35,12 +35,22 @@ def test_scanner_handles_35000_files_and_5000_directories_with_bounded_memory(
     try:
         project = store.create_project(name="scale", source_root=source)
         started = time.monotonic()
-        result = InventoryScanner(store, batch_size=500).scan(project.id)
+        # Match the production application's fast first-pass policy: collect
+        # stable metadata now and defer new-file SHA-256 reads until an item is
+        # actually selected for upload.  A scale test that hashes every fresh
+        # file measures a code path the desktop application no longer uses.
+        result = InventoryScanner(
+            store,
+            batch_size=500,
+            defer_new_hashes=True,
+        ).scan(project.id)
         elapsed = time.monotonic() - started
 
         assert result.complete
         assert result.folders == expected_directories == 5_051
         assert result.files == expected_files == 35_000
+        run = store.get_job_run(result.run_id)
+        assert run.summary["hashes_deferred"] == expected_files
         assert elapsed < 180
     finally:
         store.close()

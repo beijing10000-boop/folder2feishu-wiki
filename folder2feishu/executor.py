@@ -305,7 +305,14 @@ class MigrationExecutor:
             else nullcontext()
         )
         interruptible.__enter__()
-        counters = self.store.plan_execution_counters(project_id, plan_id)
+        try:
+            counters = self.store.plan_execution_counters(project_id, plan_id)
+        except Exception:
+            # Without this the lease keeps renewing from its daemon heartbeat
+            # thread and no further migration for this project can ever start.
+            interruptible.__exit__(None, None, None)
+            lease.close()
+            raise
         completed = counters["completed"]
         skipped = counters["skipped"]
         bytes_completed = counters["bytes_completed"]
