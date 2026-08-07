@@ -1,6 +1,11 @@
 name: Publish Python Release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
   workflow_dispatch:
     inputs:
       tag:
@@ -26,17 +31,10 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
-      - name: Validate release tag
-        shell: pwsh
-        run: |
-          if ("${{ inputs.tag }}" -notmatch '^v\d+\.\d+\.\d+(-rc\.\d+)?$') {
-            throw "Tag 必须符合 v4.0.0 或 v4.0.0-rc.1 这类语义化版本"
-          }
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Match tag to package version
+      - name: Resolve and validate release metadata
         shell: pwsh
         run: |
           $pyproject = Get-Content -LiteralPath "pyproject.toml" -Raw
@@ -44,10 +42,28 @@ jobs:
           if (-not $match.Success) {
             throw "无法从 pyproject.toml 读取版本号"
           }
-          $expectedTag = "v" + $match.Groups[1].Value.Replace("rc", "-rc.")
-          if ("${{ inputs.tag }}" -ne $expectedTag) {
+
+          $version = $match.Groups[1].Value
+          $expectedTag = "v" + $version.Replace("rc", "-rc.")
+
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $releaseTag = "${{ inputs.tag }}"
+            $isPrerelease = [System.Convert]::ToBoolean("${{ inputs.prerelease }}")
+          }
+          else {
+            $releaseTag = $expectedTag
+            $isPrerelease = $version -match 'rc'
+          }
+
+          if ($releaseTag -notmatch '^v\d+\.\d+\.\d+(-rc\.\d+)?$') {
+            throw "Tag 必须符合 v4.0.0 或 v4.0.0-rc.1 这类语义化版本"
+          }
+          if ($releaseTag -ne $expectedTag) {
             throw "请求的 tag 与包版本不一致：应为 $expectedTag"
           }
+
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
+          "IS_PRERELEASE=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
 
       - name: Set up Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -80,7 +96,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "${{ inputs.tag }}-python-windows"
+          name: "${{ env.RELEASE_TAG }}-python-windows"
           path: |
             release/*.zip
             release/SHA256SUMS.txt
@@ -90,9 +106,9 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          tag_name: "${{ inputs.tag }}"
+          tag_name: "${{ env.RELEASE_TAG }}"
           target_commitish: "${{ github.sha }}"
-          prerelease: "${{ inputs.prerelease }}"
+          prerelease: "${{ env.IS_PRERELEASE }}"
           generate_release_notes: true
           files: |
             release/*.zip
