@@ -471,6 +471,7 @@ class MigrationPlanner:
             item_key=lambda item: item.file_identity,
             mapping_key=lambda mapping: mapping.source_file_identity,
             method="file_identity",
+            accept=MigrationPlanner._file_identity_is_trustworthy,
         )
         MigrationPlanner._match_unique_key(
             [item for item in items if item.kind == ItemKind.FILE],
@@ -485,6 +486,30 @@ class MigrationPlanner:
         return matches, ambiguity
 
     @staticmethod
+    def _file_identity_is_trustworthy(item: InventoryItem, mapping: RemoteMapping) -> bool:
+        """Reject a file-identity match that could be an OS file-id reuse.
+
+        The filesystem reuses an inode / NTFS File ID as soon as the original
+        file is deleted, so a brand new file can inherit the identity of a
+        file that was removed in the same interval.  When that happens the
+        identity match points at an unrelated remote object.
+
+        A match whose content digest is unchanged is safe either way: the plan
+        can only move or rename the remote object, never overwrite it.  A match
+        where the digest also changed is indistinguishable from "moved and
+        edited", and guessing wrong archives a remote file and replaces it with
+        unrelated content.  Refuse it: the item then becomes a plain UPLOAD and
+        the old mapping becomes an explicit missing-source report, which is the
+        documented safe-incremental behaviour.
+        """
+
+        if item.kind != ItemKind.FILE or mapping.item_kind != ItemKind.FILE:
+            return True
+        if not item.sha256 or not mapping.source_sha256:
+            return False
+        return item.sha256 == mapping.source_sha256
+
+    @staticmethod
     def _match_unique_key(
         items: list[InventoryItem],
         mappings: list[RemoteMapping],
@@ -495,6 +520,7 @@ class MigrationPlanner:
         item_key: Any,
         mapping_key: Any,
         method: str,
+        accept: Any = None,
     ) -> None:
         remaining_items = [
             item
@@ -515,6 +541,8 @@ class MigrationPlanner:
             if len(grouped_items) == len(grouped_mappings) == 1:
                 item = grouped_items[0]
                 mapping = grouped_mappings[0]
+                if accept is not None and not accept(item, mapping):
+                    continue
                 matches[item.id] = mapping
                 used.add(mapping.id)
             elif grouped_mappings:

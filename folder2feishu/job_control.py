@@ -77,13 +77,25 @@ class JobControl:
             raise JobStopped("任务已停止")
 
     def wait(self, seconds: float, *, interval: float = 0.25) -> None:
-        """Interruptible replacement for time.sleep used by retries and polling."""
+        """Interruptible replacement for time.sleep used by retries and polling.
 
-        deadline = max(0.0, float(seconds))
-        waited = 0.0
-        while waited < deadline:
-            self.checkpoint(timeout=min(interval, deadline - waited))
-            waited += min(interval, deadline - waited)
+        The wait must actually elapse: it backs the retry/backoff path in
+        ``FeishuAPIClient``, so collapsing it to a no-op would turn a single
+        429 into a burst of instant retries against Feishu.
+        """
+
+        remaining = max(0.0, float(seconds))
+        step = max(0.01, float(interval))
+        while remaining > 0.0:
+            # A pause holds here without consuming the backoff budget, and
+            # raises JobStopped as soon as the operator stops the task.
+            self.checkpoint(timeout=step)
+            slice_seconds = min(step, remaining)
+            # Event.wait blocks for the slice but returns immediately once a
+            # stop is requested, so the sleep stays interruptible.
+            if self._stop.wait(slice_seconds):
+                raise JobStopped("任务已停止")
+            remaining -= slice_seconds
 
 
 class HeartbeatPump:

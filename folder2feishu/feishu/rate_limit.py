@@ -44,13 +44,18 @@ class IntervalRateLimiter:
         self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        with self._lock:
-            now = self._monotonic()
-            delay = max(0.0, self._next_allowed - now)
-            if delay:
-                self._sleep(delay)
-                now = max(self._monotonic(), self._next_allowed)
-            self._next_allowed = max(now, self._next_allowed) + self._interval
+        # The slot is reserved under the lock, but the wait itself happens
+        # outside it. Sleeping while holding the lock would block defer() and
+        # every other worker behind a server cooldown that can reach minutes,
+        # and would make the whole bucket unresponsive to stop requests.
+        while True:
+            with self._lock:
+                now = self._monotonic()
+                delay = max(0.0, self._next_allowed - now)
+                if delay <= 0.0:
+                    self._next_allowed = max(now, self._next_allowed) + self._interval
+                    return
+            self._sleep(delay)
 
     def defer(self, seconds: float) -> None:
         """Apply a server-requested cooldown to every caller in this bucket."""

@@ -452,7 +452,9 @@ class DriveService:
                 return
             if status in {"failed", "failure", "error"}:
                 raise FeishuError(f"飞书云盘异步任务失败：{task_id}")
-            time.sleep(1.0)
+            # Use the client waiter so a pause or stop interrupts the poll
+            # instead of ignoring the operator for up to the full timeout.
+            self.api.wait(1.0)
         raise FeishuError(f"飞书云盘异步任务等待超时：{task_id}")
 
     def reconcile_child(
