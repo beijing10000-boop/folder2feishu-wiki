@@ -25,7 +25,8 @@ export function ConfigStep() {
   const c = useConsole();
   const {
     settings, setSettings, secret, setSecret, auth, draft, setDraft, validation,
-    configReady, passedCount, busy, markValidation, invalidateDownstream
+    configReady, passedCount, busy, connectionSettingsLocked, markValidation,
+    invalidateDownstream
   } = c;
 
   /** Every credential edit invalidates the verdict it produced. */
@@ -53,7 +54,13 @@ export function ConfigStep() {
               <strong>{passedCount}</strong>
               <span>/ 6 项已验证</span>
             </span>
-            <Button icon={SearchCheck} busy={busy === "validate-all"} onClick={() => c.validateAll()}>
+            <Button
+              icon={SearchCheck}
+              busy={busy === "validate-all"}
+              disabled={connectionSettingsLocked}
+              title={connectionSettingsLocked ? "请先在运行对账页停止当前迁移任务" : undefined}
+              onClick={() => c.validateAll()}
+            >
               一键验证全部
             </Button>
             <Button
@@ -66,6 +73,15 @@ export function ConfigStep() {
             </Button>
           </div>
         </div>
+        {connectionSettingsLocked ? (
+          <div className="note note--warning" role="status">
+            <LockKeyhole size={16} />
+            <div>
+              <strong>迁移任务正在运行或暂停，飞书连接配置已锁定</strong>
+              <span>如需修改或重新验证应用与上传速率，请先返回“运行对账”停止当前任务。</span>
+            </div>
+          </div>
+        ) : null}
         <ol className="checklist" aria-label="必要配置验证状态">
           {validationChecklist.map(([key, no, label, detail]) => (
             <li className={`checklist__item is-${validation[key].status}`} key={key}>
@@ -109,6 +125,7 @@ export function ConfigStep() {
                       }}
                       placeholder="请输入飞书应用编号"
                       autoComplete="off"
+                      disabled={connectionSettingsLocked}
                       required
                     />
                   </Field>
@@ -130,6 +147,7 @@ export function ConfigStep() {
                       }}
                       placeholder={settings.app_secret_configured ? "••••••••••••••••" : "输入应用密钥"}
                       autoComplete="new-password"
+                      disabled={connectionSettingsLocked}
                       required={!settings.app_secret_configured}
                     />
                   </Field>
@@ -141,6 +159,7 @@ export function ConfigStep() {
                       setSettings({ ...settings, redirect_uri: event.target.value });
                       touchAppConfig("回调地址已修改，请重新验证");
                     }}
+                    disabled={connectionSettingsLocked}
                     required
                   />
                 </Field>
@@ -155,7 +174,12 @@ export function ConfigStep() {
                   </div>
                 </div>
                 <div className="button-row">
-                  <Button type="submit" icon={ShieldCheck} busy={validation.app.status === "checking"}>
+                  <Button
+                    type="submit"
+                    icon={ShieldCheck}
+                    busy={validation.app.status === "checking"}
+                    disabled={connectionSettingsLocked}
+                  >
                     验证应用配置
                   </Button>
                   <Button
@@ -190,6 +214,7 @@ export function ConfigStep() {
                     max="5"
                     step="0.1"
                     value={settings.upload_qps}
+                    disabled={connectionSettingsLocked}
                     onChange={(event) => {
                       setSettings({ ...settings, upload_qps: Number(event.target.value || 0) });
                       markValidation("throttle", "idle", "每秒上传请求数已修改，请重新验证");
@@ -207,6 +232,7 @@ export function ConfigStep() {
                 <Button
                   icon={SearchCheck}
                   busy={validation.throttle.status === "checking"}
+                  disabled={connectionSettingsLocked}
                   onClick={c.validateThrottle}
                 >
                   验证并保存并发速率
@@ -429,7 +455,12 @@ export function ConfigStep() {
               </div>
 
               <div className="button-row button-row--end">
-                <Button type="submit" icon={SearchCheck} busy={busy === "validate-all"}>
+                <Button
+                  type="submit"
+                  icon={SearchCheck}
+                  busy={busy === "validate-all"}
+                  disabled={connectionSettingsLocked}
+                >
                   一键验证全部
                 </Button>
                 <Button
