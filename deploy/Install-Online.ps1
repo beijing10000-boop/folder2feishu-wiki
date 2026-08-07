@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v4.0.0",
+    [string]$Version = "v4.0.1",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$InstallDir = "D:\Folder2FeishuDrive\App",
     [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data"
