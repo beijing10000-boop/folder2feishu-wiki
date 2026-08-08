@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = "D:\Folder2FeishuDrive\App",
-    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data",
+    [string]$ProjectsRoot = "D:\Folder2FeishuDrive\Projects",
+    [string]$RuntimeDir = "",
     [string]$PythonCommand = "",
     [switch]$NoShortcut,
     [switch]$SkipLaunch
@@ -17,7 +18,13 @@ else {
     (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
-$RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
+$ProjectsRoot = [System.IO.Path]::GetFullPath($ProjectsRoot)
+if ($RuntimeDir) {
+    $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
+    if ((Split-Path $RuntimeDir -Parent) -ieq $ProjectsRoot) {
+        $ProjectsRoot = Split-Path $RuntimeDir -Parent
+    }
+}
 $legacyInstallDir = [System.IO.Path]::GetFullPath(
     (Join-Path $env:LOCALAPPDATA "Programs\Folder2FeishuDrive")
 )
@@ -41,7 +48,10 @@ function Assert-TargetDriveExists {
 }
 
 Assert-TargetDriveExists -Path $InstallDir -Purpose "Program installation"
-Assert-TargetDriveExists -Path $RuntimeDir -Purpose "Runtime data"
+Assert-TargetDriveExists -Path $ProjectsRoot -Purpose "Projects data"
+if ($RuntimeDir) {
+    Assert-TargetDriveExists -Path $RuntimeDir -Purpose "Runtime data"
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "folder2feishu\__main__.py"))) {
     throw "Incomplete package: Python application source is missing."
@@ -81,7 +91,19 @@ function Stop-InstalledServers {
         if (Test-Path -LiteralPath $stopScript) {
             if ($installation.Equals($InstallDir, [System.StringComparison]::OrdinalIgnoreCase) -and
                 -not $installation.Equals($legacyInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -RuntimeDir $RuntimeDir -Quiet
+                # Older releases do not know -ProjectsRoot. Inspect the
+                # installed script first so an in-place upgrade can still
+                # stop v3/v4.0 without failing parameter binding.
+                $stopCommand = Get-Command $stopScript
+                if ($stopCommand.Parameters.ContainsKey("ProjectsRoot")) {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -ProjectsRoot $ProjectsRoot -RuntimeDir $RuntimeDir -Quiet
+                }
+                elseif ($RuntimeDir -and $stopCommand.Parameters.ContainsKey("RuntimeDir")) {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -RuntimeDir $RuntimeDir -Quiet
+                }
+                else {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -Quiet
+                }
             }
             else {
                 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -Quiet
@@ -94,6 +116,13 @@ function Stop-InstalledServers {
 }
 
 function Move-LegacyRuntime {
+    if (-not $RuntimeDir -and (Test-Path -LiteralPath $legacyRuntimeDir)) {
+        $script:RuntimeDir = Join-Path $ProjectsRoot "Imported"
+    }
+    if (-not $RuntimeDir) {
+        New-Item -ItemType Directory -Path $ProjectsRoot -Force | Out-Null
+        return
+    }
     if ($legacyRuntimeDir.Equals($RuntimeDir, [System.StringComparison]::OrdinalIgnoreCase)) {
         return
     }
@@ -171,6 +200,9 @@ function Remove-LegacyInstallation {
 }
 
 function Remove-LegacySchedules {
+    if (-not $RuntimeDir) {
+        return
+    }
     $scheduleFile = Join-Path $runtimeDir "schedules.json"
     if (-not (Test-Path -LiteralPath $scheduleFile)) {
         return
@@ -194,8 +226,12 @@ $python = Resolve-Python312
 Stop-InstalledServers
 Move-LegacyRuntime
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
-$env:FOLDER2FEISHU_HOME = $RuntimeDir
+New-Item -ItemType Directory -Path $ProjectsRoot -Force | Out-Null
+if ($RuntimeDir) {
+    New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+    $env:FOLDER2FEISHU_HOME = $RuntimeDir
+}
+$env:FOLDER2FEISHU_PROJECTS_ROOT = $ProjectsRoot
 
 $entries = @(
     "folder2feishu",
@@ -253,7 +289,7 @@ if (-not $NoShortcut) {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = (Get-Command "powershell.exe").Source
-    $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $InstallDir "Start-Folder2Feishu.ps1")
+    $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ProjectsRoot "{1}"' -f (Join-Path $InstallDir "Start-Folder2Feishu.ps1"), $ProjectsRoot
     $shortcut.WorkingDirectory = $InstallDir
     $shortcut.Description = "启动本地目录到飞书云盘迁移控制台"
     $shortcut.Save()
@@ -262,8 +298,20 @@ if (-not $NoShortcut) {
 Remove-LegacyInstallation
 
 Write-Host "Folder2Feishu installed at: $InstallDir" -ForegroundColor Green
-Write-Host "Migration ledger and credentials: $RuntimeDir" -ForegroundColor Green
+Write-Host "Projects data root: $ProjectsRoot" -ForegroundColor Green
+if ($RuntimeDir) {
+    Write-Host "Initial project data: $RuntimeDir" -ForegroundColor Green
+}
 
 if (-not $SkipLaunch) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallDir "Start-Folder2Feishu.ps1")
+    $startArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $InstallDir "Start-Folder2Feishu.ps1"),
+        "-ProjectsRoot", $ProjectsRoot
+    )
+    if ($RuntimeDir) {
+        $startArguments += @("-RuntimeDir", $RuntimeDir)
+    }
+    & powershell.exe @startArguments
 }

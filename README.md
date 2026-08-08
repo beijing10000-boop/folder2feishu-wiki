@@ -13,6 +13,7 @@ V4 延续云盘直传架构，并兼容 V3 的配置、数据库、断点台账�
 - 本地删除只报告，不自动删除飞书云盘内容。
 - 飞书对象被人工移动、改名或删除时标记冲突，不自动覆盖。
 - SQLite 台账、日志和凭据均保存在新的独立运行目录。
+- 在首页从统一数据根目录选择或新建项目；不同项目的台账、凭据和任务完全隔离。
 
 ## 系统要求
 
@@ -28,7 +29,7 @@ V4 延续云盘直传架构，并兼容 V3 的配置、数据库、断点台账�
 以普通 PowerShell 打开，执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v4.0.1/deploy/Install-Online.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/beijing10000-boop/folder2feishu-wiki/v4.1.0/deploy/Install-Online.ps1' | iex"
 ```
 
 安装完成后，从开始菜单打开“Folder2Feishu 云盘迁移”，浏览器会访问 `http://127.0.0.1:8000`。
@@ -44,8 +45,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\Folder2FeishuDrive\App\U
 ## 运行目录
 
 - 程序：`D:\Folder2FeishuDrive\App`
-- 配置、数据库和凭据：`D:\Folder2FeishuDrive\Data`
-- 日志：`D:\Folder2FeishuDrive\Data\logs\folder2feishu.log`
+- 项目数据根目录：`D:\Folder2FeishuDrive\Projects`
+- 各项目配置、数据库和凭据：`D:\Folder2FeishuDrive\Projects\<项目数据文件夹>`
+- 服务日志：`D:\Folder2FeishuDrive\Projects\.service\logs\folder2feishu.log`
+
+程序会读取 `Projects` 下的一级子文件夹作为可选项目。新建项目时，会在该目录下创建同名文件夹。切换项目不会复制、删除或合并任何数据；当前项目仍有运行、排队或暂停任务时，程序会阻止切换。
 
 从旧版升级时，安装程序会先停止服务，将 `%LOCALAPPDATA%\Folder2FeishuDrive`
 完整复制到 D 盘并逐文件校验 SHA-256；验证通过后才会删除 C 盘旧数据。
@@ -72,11 +76,12 @@ http://127.0.0.1:8000/oauth/callback
 
 ## 使用流程
 
-1. 配置：填写应用凭据、完成用户授权、设置上传速率、选择本地目录和目标云盘文件夹。
-2. 盘点：只读扫描文件、目录、大小、时间和文件标识；仅在需要上传或元数据变化时计算 SHA-256。
-3. 预检：检查授权、云盘容量、目录深度、单层对象数、占位文件和名称限制。
-4. 差异计划：确认每一项创建、上传、移动、改名、换版、跳过或冲突动作。
-5. 运行对账：后台执行并显示进度、当前对象、心跳、预计剩余时间、分片进度与实时日志。
+1. 数据项目：从 `D:\Folder2FeishuDrive\Projects` 选择已有项目，或新建同名数据文件夹。
+2. 配置：填写应用凭据、完成用户授权、设置上传速率、选择本地目录和目标云盘文件夹。
+3. 盘点：只读扫描文件、目录、大小、时间和文件标识；仅在需要上传或元数据变化时计算 SHA-256。
+4. 预检：检查授权、云盘容量、目录深度、单层对象数、占位文件和名称限制。
+5. 差异计划：确认每一项创建、上传、移动、改名、换版、跳过或冲突动作。
+6. 运行对账：后台执行并显示进度、当前对象、心跳、预计剩余时间、分片进度与实时日志。
 
 若盘点中仍有 OneDrive 云端占位文件，预检只显示黄色提醒，不阻断其他文件。待 OneDrive 下载完成后，请依次执行“重新只读盘点 → 预检 → 生成新的差异计划 → 开始迁移”；不要使用“重试失败项”，因为占位文件属于本轮延迟项而不是失败项。
 

@@ -16,7 +16,8 @@ $installed = Join-Path $testRoot "installed"
 $originalLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = Join-Path $testRoot "localappdata"
 $legacyRuntime = Join-Path $env:LOCALAPPDATA "Folder2FeishuDrive"
-$runtime = Join-Path $testRoot "simulated-d-drive\Folder2FeishuDrive\Data"
+$projectsRoot = Join-Path $testRoot "simulated-d-drive\Folder2FeishuDrive\Projects"
+$runtime = Join-Path $projectsRoot "Data"
 New-Item -ItemType Directory -Path $expanded -Force | Out-Null
 New-Item -ItemType Directory -Path $legacyRuntime -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $legacyRuntime "migration-sentinel.txt") -Value "move-me" -Encoding ascii
@@ -33,6 +34,7 @@ try {
         -ExecutionPolicy Bypass `
         -File $installer.FullName `
         -InstallDir $installed `
+        -ProjectsRoot $projectsRoot `
         -RuntimeDir $runtime `
         -NoShortcut `
         -SkipLaunch
@@ -52,6 +54,7 @@ try {
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Start-Folder2Feishu.ps1") `
+        -ProjectsRoot $projectsRoot `
         -RuntimeDir $runtime `
         -NoBrowser `
         -TimeoutSeconds $TimeoutSeconds
@@ -66,16 +69,23 @@ try {
     if ($index.StatusCode -ne 200 -or $index.Content -notmatch "<title>飞书云盘迁移") {
         throw "Python 版未正确提供前端首页。"
     }
-    $pidFile = Join-Path $runtime "server.pid"
-    $serverId = [int](Get-Content -LiteralPath $pidFile -Raw)
-    Stop-Process -Id $serverId -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    & powershell.exe `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File (Join-Path $installed "Stop-Folder2Feishu.ps1") `
+        -ProjectsRoot $projectsRoot `
+        -RuntimeDir $runtime `
+        -Quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 版首次启动测试完成后无法停止服务。"
+    }
 
     & powershell.exe `
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Update-Folder2Feishu.ps1") `
         -PackagePath $PackagePath `
+        -ProjectsRoot $projectsRoot `
         -RuntimeDir $runtime `
         -NoBrowser
     if ($LASTEXITCODE -ne 0) {
@@ -89,6 +99,7 @@ try {
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File (Join-Path $installed "Stop-Folder2Feishu.ps1") `
+        -ProjectsRoot $projectsRoot `
         -RuntimeDir $runtime `
         -Quiet
     if ($LASTEXITCODE -ne 0) {
@@ -97,10 +108,15 @@ try {
     Write-Host "Python 安装、启动、离线更新与网页健康检查通过。" -ForegroundColor Green
 }
 finally {
-    $pidFile = Join-Path $runtime "server.pid"
-    if (Test-Path -LiteralPath $pidFile) {
-        $serverId = [int](Get-Content -LiteralPath $pidFile -Raw)
-        Stop-Process -Id $serverId -Force -ErrorAction SilentlyContinue
+    $stopScript = Join-Path $installed "Stop-Folder2Feishu.ps1"
+    if (Test-Path -LiteralPath $stopScript) {
+        & powershell.exe `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File $stopScript `
+            -ProjectsRoot $projectsRoot `
+            -RuntimeDir $runtime `
+            -Quiet
     }
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

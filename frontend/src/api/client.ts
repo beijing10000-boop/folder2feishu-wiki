@@ -292,6 +292,30 @@ export const api = {
   isDemo: DEMO,
   getSession: () => loadCsrfToken().then(() => ({ ready: true })),
   health: () => request<{ ok: boolean; version: string }>(`${API_ROOT}/health`),
+  listWorkspaces: () =>
+    request<{
+      projects_root: string;
+      active_folder_name: string;
+      items: Array<{
+        folder_name: string;
+        folder_path: string;
+        project_name: string;
+        project_count: number;
+        has_ledger: boolean;
+        has_settings: boolean;
+        active: boolean;
+      }>;
+    }>(`${API_ROOT}/workspaces`),
+  selectWorkspace: (name: string) =>
+    request<{ projects_root: string; active_folder_name: string }>(
+      `${API_ROOT}/workspaces/select`,
+      { method: "POST", ...body({ name }) }
+    ),
+  createWorkspace: (name: string) =>
+    request<{ projects_root: string; active_folder_name: string }>(`${API_ROOT}/workspaces`, {
+      method: "POST",
+      ...body({ name })
+    }),
   getSettings: () =>
     request<Record<string, any>>(`${API_ROOT}/settings`).then((value) => ({
       app_id: value.app_id ?? "",

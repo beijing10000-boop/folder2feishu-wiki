@@ -3,7 +3,8 @@ param(
     [string]$PackagePath = "",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$GitHubToken = "",
-    [string]$RuntimeDir = "D:\Folder2FeishuDrive\Data",
+    [string]$ProjectsRoot = "D:\Folder2FeishuDrive\Projects",
+    [string]$RuntimeDir = "",
     [switch]$IncludePrerelease,
     [switch]$NoBrowser
 )
@@ -72,6 +73,7 @@ try {
         -ExecutionPolicy Bypass `
         -File $installer.FullName `
         -InstallDir $installDir `
+        -ProjectsRoot $ProjectsRoot `
         -RuntimeDir $RuntimeDir `
         -NoShortcut `
         -SkipLaunch
@@ -82,8 +84,11 @@ try {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $installDir "Start-Folder2Feishu.ps1"),
-        "-RuntimeDir", $RuntimeDir
+        "-ProjectsRoot", $ProjectsRoot
     )
+    if ($RuntimeDir) {
+        $startArguments += @("-RuntimeDir", $RuntimeDir)
+    }
     if ($NoBrowser) {
         $startArguments += "-NoBrowser"
     }

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "folder2feishu-drive"
-version = "4.0.1"
+version = "4.1.0"
 # A version change on main automatically publishes the matching GitHub release.
 description = "A recoverable Windows local-folder mirror for Feishu Drive."
 readme = "README.md"
