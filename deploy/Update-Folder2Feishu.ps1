@@ -68,15 +68,19 @@ try {
     if (-not $installer) {
         throw "The update bundle is incomplete: Install-Folder2Feishu.ps1 is missing."
     }
-    & powershell.exe `
-        -NoProfile `
-        -ExecutionPolicy Bypass `
-        -File $installer.FullName `
-        -InstallDir $installDir `
-        -ProjectsRoot $ProjectsRoot `
-        -RuntimeDir $RuntimeDir `
-        -NoShortcut `
-        -SkipLaunch
+    $installArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $installer.FullName,
+        "-InstallDir", $installDir,
+        "-ProjectsRoot", $ProjectsRoot,
+        "-NoShortcut",
+        "-SkipLaunch"
+    )
+    if ($RuntimeDir) {
+        $installArguments += @("-RuntimeDir", $RuntimeDir)
+    }
+    & powershell.exe @installArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Update installation failed with exit code $LASTEXITCODE."
     }

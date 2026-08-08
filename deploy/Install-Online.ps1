@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "v4.0.1",
+    [string]$Version = "v4.1.1",
     [string]$Repository = "beijing10000-boop/folder2feishu-wiki",
     [string]$InstallDir = "D:\Folder2FeishuDrive\App",
     [string]$ProjectsRoot = "D:\Folder2FeishuDrive\Projects",
@@ -50,13 +50,17 @@ try {
         throw "发布包不完整：找不到安装程序。"
     }
 
-    & powershell.exe `
-        -NoProfile `
-        -ExecutionPolicy Bypass `
-        -File $installer.FullName `
-        -InstallDir $InstallDir `
-        -ProjectsRoot $ProjectsRoot `
-        -RuntimeDir $RuntimeDir
+    $installArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $installer.FullName,
+        "-InstallDir", $InstallDir,
+        "-ProjectsRoot", $ProjectsRoot
+    )
+    if ($RuntimeDir) {
+        $installArguments += @("-RuntimeDir", $RuntimeDir)
+    }
+    & powershell.exe @installArguments
     if ($LASTEXITCODE -ne 0) {
         throw "安装失败，退出码：$LASTEXITCODE"
     }

@@ -86,7 +86,6 @@ try {
         -File (Join-Path $installed "Update-Folder2Feishu.ps1") `
         -PackagePath $PackagePath `
         -ProjectsRoot $projectsRoot `
-        -RuntimeDir $runtime `
         -NoBrowser
     if ($LASTEXITCODE -ne 0) {
         throw "Python 版离线更新测试失败，退出码：$LASTEXITCODE"
