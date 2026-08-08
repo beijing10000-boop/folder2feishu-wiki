@@ -1,4 +1,4 @@
-export type StepId = "config" | "scan" | "preflight" | "plan" | "run";
+export type StepId = "workspace" | "config" | "scan" | "preflight" | "plan" | "run";
 export type Severity = "ok" | "warning" | "error" | "info";
 export type ItemStatus =
   | "DISCOVERED"
@@ -86,6 +86,22 @@ export interface ProjectDraft {
   create_wrapper: boolean;
   wrapper_name?: string;
   mode?: "safe_incremental";
+}
+
+export interface DataWorkspace {
+  folder_name: string;
+  folder_path: string;
+  project_name: string;
+  project_count: number;
+  has_ledger: boolean;
+  has_settings: boolean;
+  active: boolean;
+}
+
+export interface WorkspaceList {
+  projects_root: string;
+  active_folder_name: string;
+  items: DataWorkspace[];
 }
 
 export interface PreflightCheck {

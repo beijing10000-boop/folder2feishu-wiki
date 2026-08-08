@@ -8,8 +8,10 @@ import { PlanStep } from "./steps/PlanStep";
 import { PreflightStep } from "./steps/PreflightStep";
 import { RunStep } from "./steps/RunStep";
 import { ScanStep } from "./steps/ScanStep";
+import { WorkspaceStep } from "./steps/WorkspaceStep";
 
 const stepViews = {
+  workspace: WorkspaceStep,
   config: ConfigStep,
   scan: ScanStep,
   preflight: PreflightStep,
@@ -36,15 +38,21 @@ function App() {
           <div className="page-head">
             <div className="page-head__text">
               <span className="eyebrow">
-                {activeStep.no} / 05 · {activeStep.eyebrow}
+                {activeStep.no} / 06 · {activeStep.eyebrow}
               </span>
               <h1>{activeStep.label}</h1>
               <p>{activeStep.description}</p>
             </div>
             <div className={`project-plate ${project ? "" : "is-empty"}`.trim()}>
               <span>当前项目</span>
-              <strong>{project ? project.name : "尚未创建迁移项目"}</strong>
-              <small>{project ? `项目编号 · ${project.id}` : "完成配置验证后生成台账"}</small>
+              <strong>
+                {project?.name ?? console.activeWorkspace?.project_name ?? "尚未配置迁移项目"}
+              </strong>
+              <small>
+                {console.activeWorkspace
+                  ? `数据文件夹 · ${console.activeWorkspace.folder_name}`
+                  : "请先选择或新建数据项目"}
+              </small>
             </div>
           </div>
 

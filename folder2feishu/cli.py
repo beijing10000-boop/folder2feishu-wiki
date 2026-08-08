@@ -21,6 +21,8 @@ from .core import JobRun, MigrationState, RunStatus, RunType
 from .executor import ExecutionResult
 from .logging_config import configure_logging
 from .runtime import RuntimePaths
+from .settings import PublicSettings
+from .workspaces import WorkspaceManager, default_projects_root
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,14 +68,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-dir",
         type=Path,
-        help=argparse.SUPPRESS,
+        help="兼容参数：首次启动时优先打开的现有项目数据目录",
+    )
+    parser.add_argument(
+        "--projects-root",
+        type=Path,
+        help=r"统一项目数据根目录，默认 D:\Folder2FeishuDrive\Projects",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
 
 def _latest_resumable_run(
-    services: ApplicationServices,
+    services: ApplicationServices | WorkspaceManager,
     project_id: str,
 ) -> JobRun | None:
     """Return only the latest interrupted migration, never an older superseded run."""
@@ -120,7 +127,10 @@ def _execution_exit_code(result: ExecutionResult) -> int:
     return 0
 
 
-def run_project(services: ApplicationServices, project_id: str) -> int:
+def run_project(
+    services: ApplicationServices | WorkspaceManager,
+    project_id: str,
+) -> int:
     project = services.store.get_project(project_id)
     resumable = _latest_resumable_run(services, project_id)
     if resumable is not None:
@@ -170,9 +180,26 @@ def run_project(services: ApplicationServices, project_id: str) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    paths = RuntimePaths.discover(args.runtime_dir).ensure()
-    configure_logging(paths)
-    services = ApplicationServices(paths=paths)
+    projects_root = (args.projects_root or default_projects_root()).expanduser().resolve()
+    legacy_single_runtime = False
+    if args.runtime_dir and args.projects_root is None:
+        candidate = args.runtime_dir.expanduser().resolve()
+        if candidate.parent.name.casefold() == "projects":
+            projects_root = candidate.parent
+        else:
+            # Preserve the long-standing arbitrary --runtime-dir contract for
+            # scripts and headless invocations outside the managed Projects
+            # root. The six-step UI uses WorkspaceManager by default.
+            legacy_single_runtime = True
+    services: ApplicationServices | WorkspaceManager
+    if legacy_single_runtime:
+        runtime_paths = RuntimePaths.discover(args.runtime_dir).ensure()
+        services = ApplicationServices(paths=runtime_paths)
+        log_paths = runtime_paths
+    else:
+        services = WorkspaceManager(projects_root, initial_runtime=args.runtime_dir)
+        log_paths = services.service_paths
+    configure_logging(log_paths)
     if args.run_project:
         try:
             return run_project(services, args.run_project)
@@ -182,14 +209,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             services.close()
 
-    settings = services.settings_store.load()
+    has_active = not isinstance(services, WorkspaceManager) or services.has_active
+    settings = services.settings_store.load() if has_active else PublicSettings()
     # Public settings validation guarantees this is localhost-only.
     address = f"http://127.0.0.1:{settings.port}"
     if not _local_port_available(settings.port):
         message = (
             f"本机端口 {settings.port} 已被占用，迁移作业台无法启动。\n\n"
             "请先关闭另一个 Folder2Feishu 实例或占用该端口的程序，"
-            f"再重新启动。\n\n日志：{paths.logs / 'folder2feishu.log'}"
+            f"再重新启动。\n\n日志：{log_paths.logs / 'folder2feishu.log'}"
         )
         LOGGER.error(message.replace("\n", " "))
         _show_startup_error(message)
@@ -214,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         LOGGER.exception("控制台启动失败")
         _show_startup_error(
-            f"迁移作业台启动失败。请查看日志后重试：\n\n{paths.logs / 'folder2feishu.log'}"
+            f"迁移作业台启动失败。请查看日志后重试：\n\n{log_paths.logs / 'folder2feishu.log'}"
         )
         return 1
     finally:

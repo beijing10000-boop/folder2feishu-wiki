@@ -7,6 +7,9 @@ const apiMock = vi.hoisted(() => ({
   isDemo: false,
   getSession: vi.fn(),
   health: vi.fn(),
+  listWorkspaces: vi.fn(),
+  selectWorkspace: vi.fn(),
+  createWorkspace: vi.fn(),
   getSettings: vi.fn(),
   getAuthStatus: vi.fn(),
   listProjects: vi.fn(),
@@ -70,12 +73,33 @@ function rejectOptionalProjectReads() {
   apiMock.getAudit.mockRejectedValue(new Error("no audit"));
 }
 
+async function enterConfiguration() {
+  expect(await screen.findByRole("heading", { name: "选择项目", level: 1 })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "进入配置" }));
+  expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
+}
+
 describe("配置优先迁移向导", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
     apiMock.getSession.mockResolvedValue({ ready: true });
     apiMock.health.mockResolvedValue({ ok: true, version: "3.0-test" });
+    apiMock.listWorkspaces.mockResolvedValue({
+      projects_root: "D:\\Folder2FeishuDrive\\Projects",
+      active_folder_name: "Test",
+      items: [
+        {
+          folder_name: "Test",
+          folder_path: "D:\\Folder2FeishuDrive\\Projects\\Test",
+          project_name: "",
+          project_count: 0,
+          has_ledger: true,
+          has_settings: true,
+          active: true
+        }
+      ]
+    });
     apiMock.getSettings.mockResolvedValue(emptySettings);
     apiMock.getAuthStatus.mockResolvedValue(emptyAuth);
     apiMock.listProjects.mockResolvedValue([]);
@@ -114,7 +138,7 @@ describe("配置优先迁移向导", () => {
   it("首次打开只显示配置入口，并锁定盘点及后续步骤", async () => {
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "配置", level: 1 })).toBeInTheDocument();
+    await enterConfiguration();
     expect(screen.getByText("飞书应用与本机安全配置")).toBeInTheDocument();
     expect(screen.getByText("云盘上传速率")).toBeInTheDocument();
     expect(screen.getByText("唯一来源、唯一云盘落点与安全增量")).toBeInTheDocument();
@@ -134,6 +158,7 @@ describe("配置优先迁移向导", () => {
   it("核心控制台标签统一使用中文展示", async () => {
     render(<App />);
 
+    await enterConfiguration();
     expect(await screen.findByText("必要配置检查")).toBeInTheDocument();
     expect(screen.getByText("应用凭据")).toBeInTheDocument();
     expect(screen.getByText("固定操作身份")).toBeInTheDocument();
@@ -223,6 +248,8 @@ describe("配置优先迁移向导", () => {
 
     render(<App />);
 
+    await enterConfiguration();
+
     const rail = await screen.findByLabelText("迁移步骤");
     const scanStep = within(rail).getByText("盘点").closest("button");
     expect(scanStep).toBeDisabled();
@@ -290,6 +317,8 @@ describe("配置优先迁移向导", () => {
     apiMock.updateProject.mockResolvedValue(project);
 
     render(<App />);
+
+    await enterConfiguration();
 
     const rail = await screen.findByLabelText("迁移步骤");
     const scanStep = within(rail).getByText("盘点").closest("button");

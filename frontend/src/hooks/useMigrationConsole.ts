@@ -4,6 +4,7 @@ import type {
   AppSettings,
   AuditEvent,
   AuthStatus,
+  DataWorkspace,
   MigrationPlan,
   PlannedActionKind,
   PreflightResult,
@@ -15,7 +16,8 @@ import type {
   ScanResult,
   Severity,
   StepId,
-  TreeNode
+  TreeNode,
+  WorkspaceList
 } from "../types";
 import {
   ValidationKey,
@@ -53,6 +55,7 @@ export function useMigrationConsole() {
     scopes: []
   });
   const [project, setProject] = useState<Project>();
+  const [workspaces, setWorkspaces] = useState<WorkspaceList>();
   const [draft, setDraft] = useState<ProjectDraft>(emptyDraft);
   const [scan, setScan] = useState<ScanResult>();
   const [preflight, setPreflight] = useState<PreflightResult>();
@@ -157,11 +160,20 @@ export function useMigrationConsole() {
     (async () => {
       try {
         await withBootTimeout(api.getSession());
-        const [health, currentSettings, currentAuth, projects] = await withBootTimeout(
-          Promise.all([api.health(), api.getSettings(), api.getAuthStatus(), api.listProjects()])
+        const [health, workspaceState] = await withBootTimeout(
+          Promise.all([api.health(), api.listWorkspaces()])
         );
         if (!alive) return;
         setVersion(health.version);
+        setWorkspaces(workspaceState);
+        if (!workspaceState.active_folder_name) {
+          setStep("workspace");
+          return;
+        }
+        const [currentSettings, currentAuth, projects] = await withBootTimeout(
+          Promise.all([api.getSettings(), api.getAuthStatus(), api.listProjects()])
+        );
+        if (!alive) return;
         setSettings(currentSettings);
         setAuth(currentAuth);
         const activeProject = projects[0];
@@ -214,8 +226,6 @@ export function useMigrationConsole() {
           // long time to hydrate. They must never hold the whole application
           // behind the boot screen.
           void loadProjectData(activeProject);
-        } else {
-          setStep("config");
         }
       } catch (error) {
         if (alive) {
@@ -451,6 +461,35 @@ export function useMigrationConsole() {
     setProject(saved);
     if (!silent) notify(project ? "迁移配置已更新。" : "迁移项目已创建。");
     return saved;
+  };
+
+  const selectWorkspace = async (folderName: string) => {
+    if (!folderName) return;
+    if (folderName === workspaces?.active_folder_name) {
+      setStep("config");
+      return;
+    }
+    setBusy("workspace-select");
+    try {
+      await api.selectWorkspace(folderName);
+      rememberStep("config");
+      window.location.reload();
+    } catch (error) {
+      showError(error);
+      setBusy("");
+    }
+  };
+
+  const createWorkspace = async (name: string) => {
+    setBusy("workspace-create");
+    try {
+      await api.createWorkspace(name);
+      rememberStep("config");
+      window.location.reload();
+    } catch (error) {
+      showError(error);
+      setBusy("");
+    }
   };
 
   const validateSource = async (): Promise<boolean> => {
@@ -734,12 +773,14 @@ export function useMigrationConsole() {
   const refreshCurrentPage = async () => {
     setBusy("page-refresh");
     try {
-      const [health, currentSettings, currentAuth, projects] = await Promise.all([
+      const [workspaceState, health, currentSettings, currentAuth, projects] = await Promise.all([
+        api.listWorkspaces(),
         api.health(),
         api.getSettings(),
         api.getAuthStatus(),
         api.listProjects()
       ]);
+      setWorkspaces(workspaceState);
       setVersion(health.version);
       setSettings(currentSettings);
       setAuth(currentAuth);
@@ -769,6 +810,7 @@ export function useMigrationConsole() {
   // ------------------------------------------------------------- derived
   const stepStatus = (id: StepId): StepStatus => {
     if (id === step) return "active";
+    if (id === "workspace") return workspaces?.active_folder_name ? "done" : "pending";
     if (id === "config") return configReady ? "done" : "pending";
     if (id === "scan") return scan?.summary.scan_complete ? "done" : "pending";
     if (id === "preflight") return preflight?.writable ? "done" : preflight ? "blocked" : "pending";
@@ -778,6 +820,8 @@ export function useMigrationConsole() {
   };
 
   const stepEnabled = (id: StepId): boolean => {
+    if (id === "workspace") return true;
+    if (!workspaces?.active_folder_name) return false;
     if (id === "config") return true;
     if (id === "scan") return configReady;
     if (id === "preflight") return configReady && Boolean(scan?.summary.scan_complete);
@@ -788,6 +832,7 @@ export function useMigrationConsole() {
 
   const stepDisabledReason = (id: StepId): string | undefined => {
     if (stepEnabled(id)) return undefined;
+    if (!workspaces?.active_folder_name) return "先选择或新建数据项目";
     if (id === "scan") return "先在配置页完成全部必要验证";
     if (id === "preflight") return "先完成本地目录盘点";
     if (id === "plan") return "先通过权限、容量与写入能力预检";
@@ -800,6 +845,9 @@ export function useMigrationConsole() {
   const byteProgress = run ? formatPercent(run.bytes_completed, run.bytes_total) : 0;
   const runProcessed = run ? run.completed + run.failed + run.conflicts : 0;
   const passedCount = Object.values(validation).filter((item) => item.status === "passed").length;
+  const activeWorkspace: DataWorkspace | undefined = workspaces?.items.find(
+    (item) => item.folder_name === workspaces.active_folder_name
+  );
 
   const filteredActions = useMemo(
     () =>
@@ -820,6 +868,7 @@ export function useMigrationConsole() {
   return {
     // state
     step, setStep, version, settings, setSettings, secret, setSecret, auth, project, draft,
+    workspaces, activeWorkspace,
     setDraft, scan, preflight, tree, plan, run, backgroundTask, runItems, events, runtimeLogs,
     validation, actionFilter, setActionFilter, runFilter, setRunFilter, busy, booting, bootError,
     notice, setNotice,
@@ -829,7 +878,7 @@ export function useMigrationConsole() {
     // commands
     notify, showError, markValidation, invalidateDownstream, loadTreeChildren, validateApp,
     validateThrottle, validateOauth, validateSource, validateTarget, validatePolicy, validateAll,
-    beginAuth, startScan, refreshPreflight, buildPlan, confirmPlan, startRun, controlRun,
+    beginAuth, selectWorkspace, createWorkspace, startScan, refreshPreflight, buildPlan, confirmPlan, startRun, controlRun,
     stopBackgroundTask, reconcile, exportAudit, refreshCurrentPage
   };
 }

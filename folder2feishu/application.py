@@ -670,6 +670,12 @@ class ApplicationServices:
                 return run
         return None
 
+    def has_active_work(self) -> bool:
+        """Return whether this runtime is unsafe to close or switch away from."""
+
+        counts = self.store.job_status_counts()
+        return any(counts.get(status, 0) for status in ("QUEUED", "RUNNING", "PAUSED"))
+
     @staticmethod
     def _quota_capacity_check(
         quota: dict[str, Any],

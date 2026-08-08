@@ -49,8 +49,10 @@ from .runtime import bundled_path
 from .runtime_logs import read_runtime_logs
 from .settings import PublicSettings
 from .web_security import LocalRequestGuard, new_csrf_token
+from .workspaces import WorkspaceManager
 
 LOGGER = logging.getLogger(__name__)
+ServiceAccess = ApplicationServices | WorkspaceManager
 
 
 class ApiFailure(RuntimeError):
@@ -77,6 +79,11 @@ class PlanCommand(BaseModel):
     confirmed: bool = False
 
 
+class WorkspaceCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+
+
 def _error(
     status_code: int,
     code: str,
@@ -89,7 +96,7 @@ def _error(
     return JSONResponse(status_code=status_code, content={"error": payload})
 
 
-def _project_payload(services: ApplicationServices, project: Any) -> dict[str, Any]:
+def _project_payload(services: ServiceAccess, project: Any) -> dict[str, Any]:
     runs = services.store.list_job_runs(project.id, limit=20)
     last_migration = next((run for run in runs if run.run_type == RunType.MIGRATION), None)
     return {
@@ -128,7 +135,7 @@ def _issue_payload(issue: Any) -> dict[str, Any]:
     }
 
 
-def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, Any]:
+def _scan_payload(services: ServiceAccess, project_id: str) -> dict[str, Any]:
     project = services.store.get_project(project_id)
     latest_run = next(
         (
@@ -181,7 +188,7 @@ def _scan_payload(services: ApplicationServices, project_id: str) -> dict[str, A
 
 
 def _job_payload(
-    services: ApplicationServices,
+    services: ServiceAccess,
     run_id: str,
     snapshot: JobSnapshot | None = None,
 ) -> dict[str, Any]:
@@ -331,7 +338,7 @@ def _job_payload(
     }
 
 
-def _audit_rows(services: ApplicationServices, project_id: str) -> list[dict[str, Any]]:
+def _audit_rows(services: ServiceAccess, project_id: str) -> list[dict[str, Any]]:
     actions = {action.id: action for action in services.store.list_plan_actions(project_id)}
     rows: list[dict[str, Any]] = []
     for event in services.store.list_audit(project_id):
@@ -357,17 +364,22 @@ def _audit_rows(services: ApplicationServices, project_id: str) -> list[dict[str
 
 
 def create_app(
-    services: ApplicationServices | None = None,
+    services: ApplicationServices | WorkspaceManager | None = None,
     *,
     static_root: Path | None = None,
 ) -> FastAPI:
     owned_services = services is None
     services = services or ApplicationServices()
+    workspace_manager = services if isinstance(services, WorkspaceManager) else None
     csrf_token = new_csrf_token()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        interrupted = services.store.interrupt_orphaned_job_runs(stale_after_seconds=0)
+        interrupted = (
+            workspace_manager.recover_active_jobs()
+            if workspace_manager is not None
+            else services.store.interrupt_orphaned_job_runs(stale_after_seconds=0)
+        )
         if interrupted:
             LOGGER.warning("recovered %s orphaned durable task(s) on startup", interrupted)
         yield
@@ -488,6 +500,55 @@ def create_app(
     @app.get("/api/v2/session")
     def session() -> dict[str, str]:
         return {"csrf_token": csrf_token}
+
+    @app.get("/api/v2/workspaces")
+    def list_workspaces() -> dict[str, Any]:
+        if workspace_manager is not None:
+            return workspace_manager.list_workspaces()
+        return {
+            "projects_root": str(services.paths.base.parent),
+            "active_folder_name": services.paths.base.name,
+            "items": [
+                {
+                    "folder_name": services.paths.base.name,
+                    "folder_path": str(services.paths.base),
+                    "project_name": (
+                        services.store.list_projects()[0].name
+                        if services.store.list_projects()
+                        else ""
+                    ),
+                    "project_count": len(services.store.list_projects()),
+                    "has_ledger": services.paths.database.is_file(),
+                    "has_settings": services.paths.settings.is_file(),
+                    "active": True,
+                }
+            ],
+        }
+
+    @app.post("/api/v2/workspaces/select")
+    def select_workspace(value: WorkspaceCommand) -> dict[str, Any]:
+        if workspace_manager is None:
+            if value.name == services.paths.base.name:
+                return {
+                    "projects_root": str(services.paths.base.parent),
+                    "active_folder_name": services.paths.base.name,
+                }
+            raise ApiFailure(409, "WORKSPACE_MODE_DISABLED", "当前启动方式不支持切换数据项目")
+        try:
+            return workspace_manager.select_workspace(value.name)
+        except KeyError as exc:
+            raise ApiFailure(404, "WORKSPACE_NOT_FOUND", "数据项目不存在或已被移动") from exc
+        except ValueError as exc:
+            raise ApiFailure(409, "WORKSPACE_BUSY", str(exc)) from exc
+
+    @app.post("/api/v2/workspaces")
+    def create_workspace(value: WorkspaceCommand) -> dict[str, Any]:
+        if workspace_manager is None:
+            raise ApiFailure(409, "WORKSPACE_MODE_DISABLED", "当前启动方式不支持新建数据项目")
+        try:
+            return workspace_manager.create_workspace(value.name)
+        except ValueError as exc:
+            raise ApiFailure(409, "WORKSPACE_CREATE_FAILED", str(exc)) from exc
 
     @app.get("/api/v2/settings")
     def get_settings() -> dict[str, Any]:
@@ -937,8 +998,13 @@ def create_app(
         after: int | None = Query(default=None, ge=0),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict[str, Any]:
+        log_path = (
+            services.service_paths.logs / "folder2feishu.log"
+            if isinstance(services, WorkspaceManager)
+            else services.paths.logs / "folder2feishu.log"
+        )
         return read_runtime_logs(
-            services.paths.logs / "folder2feishu.log",
+            log_path,
             after=after,
             limit=limit,
         )
