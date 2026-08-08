@@ -96,7 +96,17 @@ function Stop-InstalledServers {
                 # stop v3/v4.0 without failing parameter binding.
                 $stopCommand = Get-Command $stopScript
                 if ($stopCommand.Parameters.ContainsKey("ProjectsRoot")) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -ProjectsRoot $ProjectsRoot -RuntimeDir $RuntimeDir -Quiet
+                    $stopArguments = @(
+                        "-NoProfile",
+                        "-ExecutionPolicy", "Bypass",
+                        "-File", $stopScript,
+                        "-ProjectsRoot", $ProjectsRoot,
+                        "-Quiet"
+                    )
+                    if ($RuntimeDir) {
+                        $stopArguments += @("-RuntimeDir", $RuntimeDir)
+                    }
+                    & powershell.exe @stopArguments
                 }
                 elseif ($RuntimeDir -and $stopCommand.Parameters.ContainsKey("RuntimeDir")) {
                     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -RuntimeDir $RuntimeDir -Quiet
